@@ -1,0 +1,32 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run suite (python3)
+        run: make test
+
+      - name: Run suite (python:2.7-slim)
+        run: make test-py2
+
+      - name: Package bundle
+        run: |
+          rm -f Contents/Code/*.pyc
+          zip -r "AudiobookDB-${GITHUB_REF_NAME}.zip" Contents/
+          unzip -l "AudiobookDB-${GITHUB_REF_NAME}.zip"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "AudiobookDB-${GITHUB_REF_NAME}.zip"
+          generate_release_notes: true
