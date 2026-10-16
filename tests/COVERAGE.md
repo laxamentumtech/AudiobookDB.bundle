@@ -1,7 +1,13 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 203 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 206 tests, 0 network.
+
+Note: the py3 shim (`tests/plex_shim.py`) monkeypatches
+`ScoreTool.reduce_string` to decode bytes first, because the production
+path (inherited verbatim from legacy) encodes the title to `bytes` and
+`bytes.replace` is py3-incompatible. The suite therefore exercises a
+slightly py3-adapted scoring path; the bundle targets python2.7.
 
 ## Contents/Code modules → test files
 
@@ -14,14 +20,14 @@ Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
 | `search_tools.py` | `test_search_tools.py` |
 | `update_tools.py` | `test_update_tools.py` |
 
-## `test_agent.py` (20 tests) — end-to-end agent flows
+## `test_agent.py` (21 tests) — end-to-end agent flows
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestStartAndIdentity` | 5 | `Start`, `ValidatePrefs`, `getDateFromString`, agent name/prefix constants |
 | `TestAlbumSearch` | 4 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all) |
 | `TestAlbumQuickMatch` | 3 | `search` ASIN quick-match: album/filename ASIN → single 100-point result; unresolvable ASIN falls through |
-| `TestAlbumUpdate` | 5 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed |
+| `TestAlbumUpdate` | 6 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only) |
 | `TestArtistSearchAndUpdate` | 3 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched |
 
 ## `test_api_client.py` (26 tests)
@@ -32,8 +38,8 @@ Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
 | `TestFetchBytes` | 2 | `fetch_bytes`: returns raw bytes; raises `IOError` after exhaustion |
 | `TestPostJson` | 2 | `post_json`: headers + JSON body; failure → `None` |
 | `TestResolveAsinBook` | 2 | `resolve_asin_book`: single hit → book ID; 404 → `None` |
-| `TestResolveAsinPerson` | 2 | `resolve_asin_person`: single hit → person ID; empty/ambiguous → `None` |
-| `TestDetailAndGetters` | 8 | `get_book` (+ `include=chapters`), `get_release`, `get_person`, `get_ratings`, `search` (book/people fixtures, short-q → `None`) |
+| `TestResolveAsinPerson` | 2 | `resolve_asin_person`: single hit → hits list; failure/empty → `[]` |
+| `TestDetailAndGetters` | 8 | `get_book` (+ `include=chapters`), `get_release`, `get_person`, `get_ratings`, `search` (book/people fixtures, short-q with no filters → `[]` with no request) |
 | `TestRetryAfter` | 4 | 429 + `Retry-After` retry then success; exhausted → `None`; oversized value clamped to `MAX_RETRY_AFTER`; negative value falls back to default |
 
 ## `test_logging.py` (16 tests)
@@ -55,14 +61,14 @@ Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (65 tests)
+## `test_search_tools.py` (66 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestCheckForAsinBooks` | 8 | album ASIN check: album/filename/series/metadata_id sources, non-ASIN ignored |
 | `TestCheckForAsinPeople` | 7 | artist ASIN check: sources, non-ASIN ignored |
 | `TestSearchToolHelpers` | 5 | `validate_author_name`: clears bad, keeps good, sets primary author |
-| `TestAlbumSearchToolBody` | 4 | `build_search_body`: with/without artist filters, too-short → `None`, nothing → `None` |
+| `TestAlbumSearchToolBody` | 5 | `build_search_body`: with/without artist filters, too-short → `None`, nothing → `None`, filters-only (short title + artist) |
 | `TestNameToInitials` | 5 | `name_to_initials`: full names, already abbreviated, multi-word |
 | `TestNormalizeName` | 3 | `normalize_name`: brackets/specials/words stripped, album→title fallback, diacritics |
 | `TestAlbumParseApiResponse` | 4 | album `parse_api_response`: fixture hits, missing required keys, non-dict items, no narrator role |
@@ -73,7 +79,7 @@ Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
 | `TestArtistParseApiResponse` | 2 | artist `parse_api_response`: fixture, missing keys rejected |
 | `TestScoreTool` | 11 | `reduce_string`, `sum_scores`, `run_score_author`, `run_score_book` (perfect, empty people, ignore-boundary skip, index penalty, language deduction), `score_album`/`score_author` no-match → 0, `score_language` mismatch |
 
-## `test_update_tools.py` (53 tests)
+## `test_update_tools.py` (54 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -82,27 +88,24 @@ Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
 | `TestAlbumParseApiResponse` | 5 | album `parse_api_response`: series, no-releases work-only, audible chip rating (absent/non-first), missing cover → empty thumb |
 | `TestReleaseSelection` | 6 | `select_release`: pinned wins, matched > only > lowest, only release, lowest-ID default, matched-not-present falls through |
 | `TestArtistResolve` | 5 | artist `resolve_item`: legacy migration, native person, 404 untouched, ambiguous ASIN untouched, wrong-type invalid |
-| `TestUpdateToolHelpers` | 7 | `cleanup_html` (books/authors), `replace_html_special`, `collect_metadata_to_log`, `collect_metadata_arrs_to_log` (legacy typo), `getDateFromString`, `volume_prefix` |
+| `TestUpdateToolHelpers` | 8 | `cleanup_html` (books/authors), `replace_html_special`, `collect_metadata_to_log` (books + authors), `collect_metadata_arrs_to_log` (legacy typo), `getDateFromString`, `volume_prefix` |
 | `TestAlbumSetters` | 10 | `set_metadata_title` (+subtitle), `set_metadata_rating` (x2, none no-op), `set_metadata_date` guard, `set_metadata_studio`, `set_metadata_summary`, `set_metadata_sort_title` (+series), `set_metadata_tags` (+keep existing genres) |
 | `TestArtistSetters` | 7 | `set_metadata_title`, `set_metadata_description`, `set_metadata_sort_title` (last name/JR/single word), `set_metadata_tags`, `set_empty_variables` |
 | `TestTagTool` | 5 | `TagTool` force-clears narrators (styles preserved when there are no narrators to re-add), non-force keeps existing, author/contributor handling, `similar=None` no-op |
 
-## Legacy → new equivalence (per MIGRATION_PLAN.md)
+## Legacy → new equivalence (legacy ref: Audnexus.bundle)
 
 | Legacy behavior | New behavior |
 |---|---|
 | `ASIN + _us` IDs | native `book.<id>[.release.<id>]`, `person.<id>` |
-| `AudiobookDB-<timestamp>.json` cache | `resolve_asin_book`/`resolve_asin_person` live lookups |
-| `results['language'].title()` | `originalLanguage` title-cased before `score_language` |
-| `r['year']` KeyError | `r.get('year')` |
-| no `Retry-After` | 429/503 `Retry-After` retry loop (max 5) |
-| `clear_styles` on forced album update | narrators re-added from release `readers`; cleared only on forced updates |
+| `HTTP.CacheTime = CACHE_1WEEK` response cache | no cache; live `resolve_asin_book`/`resolve_asin_person` lookups |
+| `result_dict['language'].title()` (KeyError if absent) | `originalLanguage` title-cased before `score_language` (None-guarded) |
+| `r['year']` KeyError on year-less hits | `book.get('copyright')`; artist hits pass no year |
+| no `Retry-After` handling | 429 `Retry-After` retry loop (max 4 attempts, value clamped to 0–60s) |
+| `clear_styles` on forced album update | narrators re-added from release `people` (role `Narrator`); styles never cleared on work-only updates |
 | `set_empty_variables` on empty `narrator` | no-op on empty `narrator` |
-| `getBookRating`/`getAuthorRating` | `get_ratings` (`audible`, `goodreads` chips, order-independent) |
-| `isAdult` filter | dropped |
-| `external=Audible:` search | person `external` query |
+| `response['rating']` from the detail body | `get_ratings` (`audible` chip, order-independent) |
+| `search_asin`/`override_with_asin` (ASIN anywhere in title/album) | `check_for_asin` is the sole ASIN appender (album/filename/metadata_id) |
 | `matchedReleaseId` select | `select_release` (pinned > matched > only > lowest) |
-| ASIN-in-title fallback search | removed |
-| multi-release per book (x2 entries) | single entry, `select_release` |
 | `store_author_as_mood` pref | kept |
-| `clear_moods`/`clear_styles` on force | kept |
+| `clear_moods` on force | kept |

@@ -68,6 +68,9 @@ def default_mapping():
             200, api_body(load_fixture(BOOK_DETAIL))),
         BASE + '/releases/dPL9fC7YnK8X': (
             200, api_body(load_fixture(RELEASE_DETAIL))),
+        BASE + '/releases/RAffFyqchypK': (
+            200, api_body(
+                load_fixture('release_detail_RAffFyqchypK.json'))),
         BASE + '/items/book/WQQDcMBQ3qUT/ratings': (
             200, api_body(load_fixture('ratings_book_WQQDcMBQ3qUT.json'))),
         BASE + '/people?external=Audible%3AB00G0WYW92&take=2': (
@@ -399,6 +402,34 @@ class TestAlbumUpdate(unittest.TestCase):
         self.assertEqual(
             metadata.id, 'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
         self.assertIsNone(metadata.title)
+
+    def test_album_search_update_round_trip(self):
+        # Search the book (the fixture hit carries no matched release,
+        # so the ID is work-only).
+        install_transport(load_fixture('search_books_martian.json'))
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(), plex_shim.Locale.Language.English,
+            True)
+        self.assertEqual(len(results.appended), 1)
+        self.assertEqual(results.appended[0].id, 'book.WQQDcMBQ3qUT')
+
+        # Update through the native ID (round trip): only detail
+        # endpoints are hit, no ASIN resolve or search.
+        install_transport(None)
+        metadata = FakeMetadata('book.WQQDcMBQ3qUT')
+        agent.AudiobookAlbum().update(
+            metadata, album_media(), plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(metadata.title, 'The Martian')
+        self.assertEqual(
+            metadata.id, 'book.WQQDcMBQ3qUT.release.RAffFyqchypK')
+        urls = [req[0] for req in HTTP.requests]
+        for url in urls:
+            self.assertNotIn('/audiobooks/external/', url)
+            self.assertNotIn('/search', url)
+        self.assertIn(BASE + '/books/WQQDcMBQ3qUT', urls)
+        self.assertIn(BASE + '/releases/RAffFyqchypK', urls)
 
 
 class TestArtistSearchAndUpdate(unittest.TestCase):

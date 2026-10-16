@@ -294,6 +294,14 @@ class TestAlbumSearchToolBody(unittest.TestCase):
         tool = make_album(FakeMedia())
         self.assertIsNone(tool.build_search_body())
 
+    def test_body_filters_only_when_title_short(self):
+        # Title below the 3-char floor, but an artist is present: the
+        # body carries the person filter without a 'q'.
+        tool = make_album(FakeMedia(album='ab', artist='Andy Weir'))
+        body = tool.build_search_body()
+        self.assertEqual(body, {'type': 'books',
+                                'filters': {'person': 'Andy Weir'}})
+
 
 class TestNameToInitials(unittest.TestCase):
     def _t(self, name):

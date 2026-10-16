@@ -415,6 +415,16 @@ class TestUpdateToolHelpers(unittest.TestCase):
         self.assertEqual(data[0], {'ID': 'book.WQQDcMBQ3qUT'})
         self.assertIn({'Book publisher': None}, data)
 
+    def test_collect_metadata_to_log_authors(self):
+        tool = make_artist()
+        tool.thumb = 'http://x/large.jpg'
+        tool.similar = [{'name': 'Andy Weir'}, {'name': 'Eric Behr'}]
+        data = tool.collect_metadata_to_log()
+        self.assertEqual(data[0], {'ID': 'person.ypMPwXzWXaiX'})
+        self.assertIn({'Author poster URL': 'http://x/large.jpg'}, data)
+        self.assertIn(
+            {'Similar Authors': 'Andy Weir, Eric Behr'}, data)
+
     def test_collect_metadata_arrs_legacy_typo(self):
         # Legacy quirk (LEGACY_ISSUES #2): the book branch is gated on the
         # singular 'book', so it never fires for 'books'.
