@@ -603,7 +603,7 @@ class ScoreTool:
         ) if authors else ''
         self.author = authors[0]['name'] if authors else ''
         self.date = self.result_dict['date']
-        self.language = self.result_dict['language']
+        self.language = (self.result_dict['language'] or '').title()
         narrators = self.result_dict['narrator']
         self.narrator = narrators[0]['name'] if narrators else ''
         self.title = self.result_dict['title']

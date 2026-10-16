@@ -313,7 +313,9 @@ class TestArtistResolve(unittest.TestCase):
         tool = make_artist('B00G0WYW92', metadata=meta)
         self.assertTrue(tool.resolve_item())
         self.assertEqual(tool.native_person_id, 'ypMPwXzWXaiX')
-        self.assertEqual(meta.id, 'person.ypMPwXzWXaiX')
+        # The ID is committed by the agent's compile_metadata, not here:
+        # a failed setter must leave the old ID in place.
+        self.assertEqual(meta.id, 'B00G0WYW92')
         self.assertEqual(tool.name, 'Andy Weir')
         self.assertEqual(
             tool.genres,

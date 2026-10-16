@@ -202,8 +202,11 @@ class AudiobookArtist(Agent.Artist):
                     api_client.fetch_bytes(helper.thumb), sort_order=0
                 )
 
-        # Commit the native ID (done in resolve_item, which sets
-        # metadata.id on success).
+        # Commit the native person ID last (after every setter succeeded),
+        # so a failed setter leaves the old ID in place.
+        helper.metadata.id = metadata_ids.serialize_person_id(
+            helper.native_person_id)
+
         helper.log_update_metadata()
 
 

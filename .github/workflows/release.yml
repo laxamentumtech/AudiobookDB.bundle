@@ -25,11 +25,11 @@ jobs:
           rm -rf Contents/Code/__pycache__
           mkdir -p AudiobookDB.bundle
           cp -r Contents AudiobookDB.bundle/
-          zip -r "AudiobookDB-${GITHUB_REF_NAME}.zip" AudiobookDB.bundle/
-          unzip -l "AudiobookDB-${GITHUB_REF_NAME}.zip"
+          zip -r "AudiobookDB.bundle.zip" AudiobookDB.bundle/
+          unzip -l "AudiobookDB.bundle.zip"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: "AudiobookDB-${GITHUB_REF_NAME}.zip"
+          files: "AudiobookDB.bundle.zip"
           generate_release_notes: true

@@ -20,8 +20,8 @@ clamping, tested in `test_api_client.py`.
 `if self.content_type == 'book':`, so the `Moods (Authors)` / `Styles
 (Narrators)` arrays are never logged for book updates. Retained for
 parity; the typo is load-bearing in legacy log output.
-Pinned by `test_update_tools.TestCollectMetadataArrsToLog`
-(`test_books_typo_branch`).
+Pinned by `test_update_tools.TestUpdateToolHelpers`
+(`test_collect_metadata_arrs_legacy_typo`).
 
 ## 3. Artist quick-match ID is `ASIN_region` — **REPLACED by the sole-appender**
 
@@ -33,7 +33,7 @@ resolves a legacy ASIN through `api_client.resolve_asin_book` /
 anything itself. Artist ASIN quick match is manual-input only (legacy
 parity — album/track filenames are not scanned for artist ASINs). Legacy
 `ASIN_region` IDs stored by the old agent still parse via
-`metadata_ids.parse_id` and migrate on first update.
+`metadata_ids.parse_metadata_id` and migrate on first update.
 
 ## 4. `metadata_arrs` logs value as key and key as label (inverted) — **KEPT**
 
@@ -50,13 +50,14 @@ paths and `search_tools.build_search_body` emits a JSON body.
 `update_tools.py` `set_metadata_sort_title` is unchanged: `John Doe, Jr.`
 sorts as `Doe, John,  Jr.` (two spaces before `Jr.`); pref-off falls back to
 the display name. Pinned by
-`test_update_tools.TestArtistSetMetadataSortTitle`.
+`test_update_tools.TestArtistSetters` (`test_set_metadata_sort_title_*`).
 
-## 7. Unguarded `r['year']` in artist search results — **KEPT**
+## 7. Unguarded `r['year']` in search results — **RESOLVED**
 
-`__init__.py` artist `search()` still passes `year=r['year']` (album path
-uses `r.get('year')`). `score_create_result` always emits `year`, so this
-cannot raise in practice; retained for parity.
+Both search parse paths guard the year: album `parse_api_response` uses
+`item.get('year', 0)` and artist `parse_api_response` uses
+`self.result_dict.get('year', 0)` (`search_tools.py`). Person search hits
+carry no year at all.
 
 ## 8. Rating is doubled (`float(rating) * 2`) — **KEPT (audible chip only)**
 
@@ -64,7 +65,7 @@ cannot raise in practice; retained for parity.
 with no clamping. The *source* changed: the rating now comes from the
 AudiobookDB ratings endpoint's **`Audible` chip only** — the first chip is
 never used (fixture: openlibrary 4.3 first, audible 4.8 -> 9.6). Pinned by
-`test_update_tools.TestSetMetadataRating` and
+`test_update_tools.TestAlbumSetters` (`test_set_metadata_rating_*`) and
 `test_agent.TestAlbumUpdate.test_legacy_asin_migration`.
 
 ## 9. `json_decode` catches only `AttributeError` — **RESOLVED (deleted)**
@@ -80,9 +81,10 @@ before scoring (album content type). Pinned by
 
 ## 11. `get_square_image` CR padding differs between py2 and py3 — **RESOLVED (deleted)**
 
-`get_square_image` was deleted: the AudiobookDB person detail has no
-`images`, so artist posters are intentionally not fetched (thumb `''`
-fallback in the search list).
+`get_square_image` was deleted: the AudiobookDB person detail can carry
+`images`, and `ArtistUpdateTool.parse_api_response` uses
+`images[0]['url'] + '/large.jpg'` as the thumb when present. Search hits
+omit `images`, so the search list has no artwork (see #14).
 
 ## 12. `logging.log_output` crashes on non-ASCII metadata under Python 2 — **KEPT (shimmed)**
 
@@ -106,18 +108,20 @@ end-to-end on both interpreters.
   digit separator is a space. The legacy agent had the same quirk; it is kept
   for parity (it only widens matches, and the resolution step 404s
   non-catalog ASINs).
-- **Pinned by:** `test_search_tools.TestCheckForAsin` (filename case),
+- **Pinned by:** `test_search_tools.TestCheckForAsinBooks` (filename case),
   `test_agent.TestAlbumQuickMatch.test_asin_in_filename_appends_single_score_100`.
 
-### 14. Person detail has no `images` — artist thumb is `''`
+### 14. Search-hit persons have no `images` — artist search list has no art
 
-- **Where:** `update_tools.py` `ArtistUpdateTool.parse_api_response` (no thumb
-  assignment); `__init__.py` artist `compile_metadata` (no poster fetch).
-- **Behaviour:** Artist updates never set `metadata.thumb` or fetch a poster;
-  the search-list description has no artwork. Deliberate: the person object
-  exposes no image field, and the legacy `get_square_image` CDN crop is gone.
-- **Pinned by:** `test_agent.TestArtistSearchAndUpdate` (no poster
-  assertions).
+- **Where:** `update_tools.py` `ArtistUpdateTool.parse_api_response` (thumb
+  from `images[0]['url'] + '/large.jpg'` when present); `__init__.py` artist
+  `compile_metadata` (poster fetch from `helper.thumb`).
+- **Behaviour:** Artist updates set `metadata.thumb`/poster from the person
+  detail's `images` when it carries them. Search hits omit `images`, so the
+  search-list description has no artwork. Deliberate: the legacy
+  `get_square_image` CDN crop is gone.
+- **Pinned by:** `test_update_tools.TestArtistResolve` (thumb assertions),
+  `test_agent.TestArtistSearchAndUpdate`.
 
 ### 15. `r['author']`/`r['narrator']` are joined strings after scoring
 

@@ -209,6 +209,14 @@ class AlbumUpdateTool(UpdateTool):
                 book, matched_release_id=matched_release_id)
             if release_id:
                 release = api_client.get_release(release_id)
+                if release is None:
+                    # A release selected (matched/only/lowest) that is
+                    # unavailable: fall back to the work-only path rather
+                    # than pinning a composite ID that would fail closed.
+                    log.info(
+                        'Release %s not found; updating work-level '
+                        'metadata only.' % release_id)
+                    release_id = None
         elif kind == 'book':
             book_id, pinned_release_id = self.parsed_id[1], self.parsed_id[2]
             if pinned_release_id:
@@ -351,6 +359,10 @@ class AlbumUpdateTool(UpdateTool):
         """
             Sets the studio.
         """
+        # Work-only updates have no release studio: don't erase an
+        # existing studio value.
+        if not self.studio:
+            return
         if not self.metadata.studio or self.force:
             self.metadata.studio = self.studio
 
@@ -382,7 +394,10 @@ class AlbumUpdateTool(UpdateTool):
         # Clears moods if force (refresh) is true.
         if self.force:
             tagger.clear_moods()
-            tagger.clear_styles()
+            # Narrator styles are release-specific: on work-only updates
+            # there is nothing to re-add, so don't clear existing styles.
+            if self.narrator:
+                tagger.clear_styles()
 
         # Genres.
         tagger.add_genres()
@@ -498,7 +513,8 @@ class ArtistUpdateTool(UpdateTool):
         # d. population
         self.native_person_id = person['id']
         self.parse_api_response(person)
-        self.metadata.id = metadata_ids.serialize_person_id(person['id'])
+        # The native ID is committed by the agent's compile_metadata,
+        # after every setter succeeds (legacy ID stays on failure).
         return True
 
     def parse_api_response(self, person):

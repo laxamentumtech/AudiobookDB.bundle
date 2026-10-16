@@ -188,6 +188,54 @@ class TestStartAndIdentity(unittest.TestCase):
 class TestAlbumSearch(unittest.TestCase):
     """New-behavior check 1: fixture-backed album search."""
 
+    @staticmethod
+    def _two_hit_response():
+        return [
+            {
+                'id': 'aaaaaaaaaaaa',
+                'title': 'The Martian',
+                'people': [
+                    {'role': {'name': 'Author'},
+                     'person': {'id': 'p1', 'name': 'Andy Weir'}}
+                ],
+                'originalLanguage': 'English',
+            },
+            {
+                'id': 'bbbbbbbbbbbb',
+                'title': 'The Martians',
+                'people': [
+                    {'role': {'name': 'Author'},
+                     'person': {'id': 'p1', 'name': 'Andy Weir'}}
+                ],
+                'originalLanguage': 'English',
+            },
+        ]
+
+    def _search(self, hits, manual):
+        install_transport(hits)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(), plex_shim.Locale.Language.English,
+            manual)
+        return results.appended
+
+    def test_search_breaks_on_good_score(self):
+        appended = self._search(self._two_hit_response(), manual=False)
+        # Top result scores 100 >= GOOD_SCORE (98), so the loop breaks
+        # after the first append; the ~95-score hit is never appended.
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0].id, 'book.aaaaaaaaaaaa')
+        self.assertEqual(appended[0].score, 100)
+
+    def test_manual_keeps_below_good_score(self):
+        appended = self._search(self._two_hit_response(), manual=True)
+        # Manual mode never short-circuits: both hits are appended.
+        self.assertEqual(len(appended), 2)
+        self.assertEqual(appended[0].id, 'book.aaaaaaaaaaaa')
+        self.assertEqual(appended[0].score, 100)
+        self.assertEqual(appended[1].id, 'book.bbbbbbbbbbbb')
+        self.assertTrue(45 <= appended[1].score < 98)
+
     def test_fixture_search_appends_serialized_id(self):
         install_transport(load_fixture('search_books_martian.json'))
         results = _Results()
@@ -336,7 +384,7 @@ class TestAlbumUpdate(unittest.TestCase):
         self.assertIn('Science Fiction', metadata.genres)
         # No release: no date, no studio, no narrators in styles.
         self.assertIsNone(metadata.originally_available_at)
-        self.assertEqual(metadata.studio, '')
+        self.assertIsNone(metadata.studio)
         self.assertEqual(metadata.styles, set())
 
     def test_pinned_release_404_preserved(self):

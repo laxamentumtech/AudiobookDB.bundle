@@ -103,8 +103,14 @@ def fetch_bytes(url):
     response = _request_with_retries(url)
     if response is None:
         raise IOError('Failed to fetch: ' + url)
+    # str() yields the raw body: py2 bytes (images) must stay bytes;
+    # a py3 str body is re-encoded. Never UTF-8-encode image bytes.
     body = str(response)
-    if isinstance(body, str):
+    try:
+        _text = unicode
+    except NameError:
+        _text = str
+    if isinstance(body, _text):
         body = body.encode('utf-8')
     return body
 
