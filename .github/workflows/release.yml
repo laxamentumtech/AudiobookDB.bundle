@@ -22,7 +22,10 @@ jobs:
       - name: Package bundle
         run: |
           rm -f Contents/Code/*.pyc
-          zip -r "AudiobookDB-${GITHUB_REF_NAME}.zip" Contents/
+          rm -rf Contents/Code/__pycache__
+          mkdir -p AudiobookDB.bundle
+          cp -r Contents AudiobookDB.bundle/
+          zip -r "AudiobookDB-${GITHUB_REF_NAME}.zip" AudiobookDB.bundle/
           unzip -l "AudiobookDB-${GITHUB_REF_NAME}.zip"
 
       - name: Publish release
