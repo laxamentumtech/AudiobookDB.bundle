@@ -1,181 +1,143 @@
-# Legacy issues pinned by the Phase-1 test suite
+# Legacy issues — post-migration status
 
-The Phase-1 suite (201 tests, green on Python 2.7 and Python 3) locks in the
-exact behaviour of the legacy Audnexus agent code, **defects included**, so
-that Phase 3 (migration to the AudiobookDB API) can deliberately change any of
-them with full visibility. Each entry cites the code location, the observable
-behaviour, the test that pins it, and the Phase-3 resolution.
+The Phase-1 suite locked in the exact behaviour of the legacy Audnexus agent,
+**defects included**. This file records the post-migration (AudiobookDB)
+status of each pinned issue, plus defects that carried over into the new
+implementation. Numbers are stable; `#n` citations in `COVERAGE.md` and test
+docstrings point here.
 
 ---
 
-## 1. `make_request` retry loop is dead code
+## 1. `make_request` retry loop is dead code — **RESOLVED (deleted)**
 
-- **Where:** `Contents/Code/__init__.py:503-518`
-- **Behaviour:** On failure the loop does
-  `log.error("Failed http request attempt #" + x + ...)` where `x` is an `int`
-  from `range()`. Concatenating `str + int` raises `TypeError` on **both**
-  py2 and py3, so the error branch crashes before `sleep(sleep_time)` can run.
-  Retries never happen. (The `try` also swallows the exception into
-  `str_error`, but the failure path itself throws.)
-- **Pinned by:** `test_agent.TestModuleHelpers.test_make_request_failure_raises_type_error`
-- **Phase 3:** rewrite `make_request` with real retry/backoff and `'...#' + str(x)`
-  (or an f-string-free `.format`, since the target stays py2-compatible).
+`make_request` (and `json_decode`) were deleted with the Audnexus API.
+`api_client.py` now has real retry/backoff for 5xx and `Retry-After`
+clamping, tested in `test_api_client.py`.
 
-## 2. `collect_metadata_arrs_to_log` compares to `'book'`, never `'books'`
+## 2. `collect_metadata_arrs_to_log` compares to `'book'`, never `'books'` — **KEPT**
 
-- **Where:** `Contents/Code/update_tools.py:109-123`
-- **Behaviour:** `content_type` is `'books'` for albums everywhere else in the
-  codebase, but this check is `if self.content_type == 'book':`. The
-  `Moods (Authors)` / `Styles (Narrators)` arrays are therefore **never**
-  logged for book updates — dead metadata logging.
-- **Pinned by:** `test_update_tools.TestCollectMetadataArrsToLog.test_books_typo_branch`
-- **Phase 3:** fix to `== 'books'` (or drop once logging is restructured).
+`update_tools.py` `collect_metadata_arrs_to_log` still checks
+`if self.content_type == 'book':`, so the `Moods (Authors)` / `Styles
+(Narrators)` arrays are never logged for book updates. Retained for
+parity; the typo is load-bearing in legacy log output.
+Pinned by `test_update_tools.TestCollectMetadataArrsToLog`
+(`test_books_typo_branch`).
 
-## 3. Artist quick-match ID is `ASIN_region`, detail lookup uses bare `ASIN`
+## 3. Artist quick-match ID is `ASIN_region` — **REPLACED by the sole-appender**
 
-- **Where:** `Contents/Code/search_tools.py:59,69,294` (IDs appended as
-  `asin + '_' + region`) vs `Contents/Code/__init__.py` update path +
-  `update_tools.extract_asin_from_id` (`update_tools.py:135-141`).
-- **Behaviour:** Artist search results are appended with IDs like
-  `B00G0WYW92_us`; Phase-3 AudiobookDB IDs are bare ASINs (`B00G0WYW92`) or
-  `us.B00G0WYW92`. Mismatched IDs mean Plex-cached artist IDs from the legacy
-  agent do not line up with the new agent's ID scheme (and the legacy code
-  itself split on `_` to recover the ASIN — note a region suffix containing
-  more `_`s would still work, but an ASIN-derived ID with no suffix is the
-  canonical form).
-- **Pinned by:** `test_agent.TestArtistSearch.test_search_appends` (IDs carry
-  `_us`), `test_update_tools.TestExtractFromId.test_extract_asin_with_region`,
-  `test_update_tools.TestExtractFromId.test_extract_asin_bare`,
-  `test_agent.TestArtistUpdate.test_update_bare_asin_id`.
-- **Phase 3:** `metadata_ids.py` normalises IDs to bare ASIN; migration note
-  in README (users re-match artists once).
+The legacy ID scheme is gone end to end. `check_for_asin`
+(`search_tools.py`) is the **sole** result appender for quick matches: it
+resolves a legacy ASIN through `api_client.resolve_asin_book` /
+`resolve_person` and appends a native `book.<id>/.release.<id>` /
+`person.<id>` result (score 100). The agent's `search()` no longer appends
+anything itself. Artist ASIN quick match is manual-input only (legacy
+parity — album/track filenames are not scanned for artist ASINs). Legacy
+`ASIN_region` IDs stored by the old agent still parse via
+`metadata_ids.parse_id` and migrate on first update.
 
-## 4. `metadata_arrs` logs value as key and key as label (inverted)
+## 4. `metadata_arrs` logs value as key and key as label (inverted) — **KEPT**
 
-- **Where:** `Contents/Code/logging.py:88-100`
-- **Behaviour:** For each `{'Label': [values...]}` dict it iterates
-  `for item in val: self.log_output(item, key, ...)` — i.e. the **list element
-  (the metadata value)** becomes the left-hand "key" column and the **label**
-  becomes the right-hand "value". Output reads `Martian             Title is`
-  instead of `Title is            Martian`.
-- **Pinned by:** `test_logging.TestMetadataArrs.test_metadata_arrs_logs_inverted_key_value`
-- **Phase 3:** swap to `log_output(key, item, ...)`.
+`logging.py` `metadata_arrs` is unchanged (byte-for-byte legacy).
+Pinned by `test_logging.TestMetadataArrs`.
 
-## 5. Double ampersand `&&keywords=` in ASIN-override book search URLs
+## 5. Double ampersand `&&keywords=` — **RESOLVED (gone with `region_tools.py`)**
 
-- **Where:** `Contents/Code/region_tools.py:126-139` +
-  `Contents/Code/search_tools.py:104`
-- **Behaviour:** `get_api_params()` ends without `?`-only (it starts `?` and
-  has no trailing `&`), but `get_api_search_url` appends `'&' + query` and the
-  ASIN-override query for books is built as `'&keywords=' + asin`, producing
-  `...products?response_groups=...&products_sort_by=Relevance&&keywords=B00...`.
-  The Audnexus/Audible API tolerates the empty first parameter, but the URL
-  is malformed.
-- **Pinned by:** `test_search_tools.TestSearchToolBuildUrl.test_build_url_asin_override_books`,
-  `test_search_tools.TestSearchToolHelpers.test_override_with_asin_books`
-  (both assert `&&keywords=` verbatim).
-- **Phase 3:** new URL builder emits `&keywords=` once.
+There are no URL builders anymore; `api_client` assembles fixed endpoint
+paths and `search_tools.build_search_body` emits a JSON body.
 
-## 6. Artist sort title keeps suffix with double space: `Doe, John,  Jr.`
+## 6. Artist sort title keeps suffix with double space: `Doe, John,  Jr.` — **KEPT**
 
-- **Where:** `Contents/Code/update_tools.py:471-489`
-- **Behaviour:** The surname regex captures group(3) as `, Jr.`-style text
-  **including its leading comma**, then `', '.join([...])` adds another
-  separator: `John Doe, Jr.` sorts as `Doe, John,  Jr.` (two spaces before
-  `Jr.`). Also, when `sort_author_by_last_name` is off the sort title falls
-  back to `metadata.title` (the display name), not a reversed form.
-- **Pinned by:** `test_update_tools.TestArtistSetMetadataSortTitle.test_suffix_kept`
-  (asserts `'Doe, John,  Jr.'`), `test_pref_false_keeps_title`.
-- **Phase 3:** join with the captured suffix stripped of its comma, e.g.
-  `'{}, {}{}'.format(last, first, suffix)`.
+`update_tools.py` `set_metadata_sort_title` is unchanged: `John Doe, Jr.`
+sorts as `Doe, John,  Jr.` (two spaces before `Jr.`); pref-off falls back to
+the display name. Pinned by
+`test_update_tools.TestArtistSetMetadataSortTitle`.
 
-## 7. Unguarded `r['year']` in artist search results
+## 7. Unguarded `r['year']` in artist search results — **KEPT**
 
-- **Where:** `Contents/Code/__init__.py:340-348`
-- **Behaviour:** `MetadataSearchResult(..., year=r['year'])` assumes every
-  scored artist dict has a `year` key. `score_create_result` only adds `year`
-  when `self.year` is truthy, so an artist result without a date raises
-  `KeyError` and kills the whole search.
-- **Pinned by:** `test_agent.TestArtistSearch.test_search_appends` (asserts
-  `year=1969` from `r['year']`; a scored artist dict without `year` would
-  raise `KeyError` — the suite relies on `score_create_result` always emitting
-  `year` in the fixtures).
-- **Phase 3:** `r.get('year')`.
+`__init__.py` artist `search()` still passes `year=r['year']` (album path
+uses `r.get('year')`). `score_create_result` always emits `year`, so this
+cannot raise in practice; retained for parity.
 
-## 8. Rating is doubled (`float(rating) * 2`)
+## 8. Rating is doubled (`float(rating) * 2`) — **KEPT (audible chip only)**
 
-- **Where:** `Contents/Code/update_tools.py:253-258`
-- **Behaviour:** Audnexus ratings are on a 0-5 scale; Plex stores 0-10, so the
-  legacy code does `* 2`. This is *intentional* but undocumented, and it is
-  applied unconditionally whenever `self.rating` is set (even pre-clamping).
-  AudiobookDB returns 0-5 as well — Phase 3 must keep the scale conversion but
-  make it explicit and clamped.
-- **Pinned by:** `test_update_tools.TestSetMetadataRating.test_rating_times_two`
-  (4.8 -> 9.6), `test_none_rating_no_change`.
-- **Phase 3:** `metadata.rating = max(0.0, min(10.0, rating * 2.0))` with a
-  named constant/comment.
+`update_tools.py` `set_metadata_rating` still applies `* 2` (Plex 0-10 scale)
+with no clamping. The *source* changed: the rating now comes from the
+AudiobookDB ratings endpoint's **`Audible` chip only** — the first chip is
+never used (fixture: openlibrary 4.3 first, audible 4.8 -> 9.6). Pinned by
+`test_update_tools.TestSetMetadataRating` and
+`test_agent.TestAlbumUpdate.test_legacy_asin_migration`.
 
-## 9. `json_decode` catches only `AttributeError`
+## 9. `json_decode` catches only `AttributeError` — **RESOLVED (deleted)**
 
-- **Where:** `Contents/Code/__init__.py:488-495`
-- **Behaviour:** Malformed JSON raises `ValueError` on py2 /
-  `json.JSONDecodeError` (subclass of `ValueError`) on py3 — neither is caught,
-  so a corrupt API response crashes the agent instead of returning `None`.
-  Only a non-string input (`None`, empty HTTP response) is handled.
-- **Pinned by:** `test_agent.TestModuleHelpers.test_json_decode_garbage`
-- **Phase 3:** catch `(ValueError, AttributeError)` (JSONDecodeError is a
-  ValueError on every supported version).
+`json_decode` was deleted with `make_request`. `api_client` raises on
+malformed payloads; no silent-corruption path remains.
 
-## 10. Manual artist search overwrites `media.album` with `media.name`
+## 10. Manual artist search overwrites `media.album` with `media.name` — **KEPT**
 
-- **Where:** `Contents/Code/search_tools.py` (`pre_process_title` / manual
-  search path used by `__init__.py` `search()` when `manual=True`)
-- **Behaviour:** For a manual single-album search the legacy code assigns
-  `media.album = media.name` before scoring, so the album-title comparison
-  silently uses the *track/file* name rather than the album field. Test
-  fixtures have to set `media.name` as well or score 0.
-- **Pinned by:** `test_search_tools.TestPreSearchLogging.test_manual_uses_user_name`
-  (asserts `tool.media.album == 'My Pick'` i.e. `media.name`).
-- **Phase 3:** prefer `media.album`, fall back to `media.name` only when empty.
+`search_tools.py` manual search path still does `media.album = media.name`
+before scoring (album content type). Pinned by
+`test_search_tools.TestPreSearchLogging`.
 
-## 11. `get_square_image` CR padding differs between py2 and py3
+## 11. `get_square_image` CR padding differs between py2 and py3 — **RESOLVED (deleted)**
 
-- **Where:** `Contents/Code/update_tools.py` (`get_square_image`)
-- **Behaviour:** `crop_x = (width - height) / 2` uses floor division on py2
-  (int / int -> int, renders `'100'`) and true division on py3
-  (-> `50.0`-style float, renders `'100.0'`) — the same code produces
-  different CDN crop URLs depending on interpreter.
-- **Pinned by:** `test_update_tools.TestGetSquareImage.test_landscape_cropped_to_square`
-- **Phase 3:** explicit `int((width - height) / 2)` so both interpreters agree.
+`get_square_image` was deleted: the AudiobookDB person detail has no
+`images`, so artist posters are intentionally not fetched (thumb `''`
+fallback in the search list).
 
-## 12. `logging.log_output` crashes on non-ASCII metadata under Python 2
+## 12. `logging.log_output` crashes on non-ASCII metadata under Python 2 — **KEPT (shimmed)**
 
-- **Where:** `Contents/Code/logging.py:44-53`
-- **Behaviour:** `output = "{key:<20}{val}".format(key=key, val=val)` uses a
-  **byte-string** template. Under py2, `str.format` coerces the result toward
-  `str`, so any non-ASCII *unicode* value (everything from `json.loads`, e.g.
-  a Spanish narrator "Xavi Fernández") raises
-  `UnicodeEncodeError: 'ascii' codec can't encode character u'\xe1'`.
-  On the real Plex runtime the bundled Log swallows this, but the plain-Python
-  port crashes.
-- **Pinned/worked around by:** `tests/plex_shim.py` (py2 branch rebinds
-  `log_output` to a unicode-safe equivalent so end-to-end tests can run;
-  documented in the shim).
-- **Phase 3:** `output = u"..."` template with safe decode fallback; delete the
-  shim patch then.
+`logging.py` is unchanged; the `tests/plex_shim.py` py2 rebind of
+`log_output` to a unicode-safe equivalent remains so the suite can run
+end-to-end on both interpreters.
+
+---
+
+## New issues (post-migration)
+
+### 13. Filename ASIN regex `(?=.\d)` matches across URL-encoded spaces
+
+- **Where:** `search_tools.py:17` `asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')`
+  (inherited verbatim from the legacy agent).
+- **Behaviour:** The lookahead `(?=.\d)` is intended to require a digit
+  within one character after the ASIN (separating it from longer digit
+  runs), but `.` matches **any** character except newline — including the `%`
+  of a URL-encoded filename. In `..._B00B5HZGUG%20(1)...` the lookahead sees
+  `B00B5HZGUG%2` and matches, i.e. the ASIN is found even when the trailing
+  digit separator is a space. The legacy agent had the same quirk; it is kept
+  for parity (it only widens matches, and the resolution step 404s
+  non-catalog ASINs).
+- **Pinned by:** `test_search_tools.TestCheckForAsin` (filename case),
+  `test_agent.TestAlbumQuickMatch.test_asin_in_filename_appends_single_score_100`.
+
+### 14. Person detail has no `images` — artist thumb is `''`
+
+- **Where:** `update_tools.py` `ArtistUpdateTool.parse_api_response` (no thumb
+  assignment); `__init__.py` artist `compile_metadata` (no poster fetch).
+- **Behaviour:** Artist updates never set `metadata.thumb` or fetch a poster;
+  the search-list description has no artwork. Deliberate: the person object
+  exposes no image field, and the legacy `get_square_image` CDN crop is gone.
+- **Pinned by:** `test_agent.TestArtistSearchAndUpdate` (no poster
+  assertions).
+
+### 15. `r['author']`/`r['narrator']` are joined strings after scoring
+
+- **Where:** `search_tools.py` `ScoreTool.score_create_result` writes
+  `author`/`narrator` as joined display strings into the scored dict.
+- **Behaviour:** The album `search()` display path guards both with
+  `r.get(...) or ''` because scored dicts no longer guarantee the keys;
+  artist results only ever carry `author`. This is a shape contract between
+  `ScoreTool` and the agent loop, not a user-facing defect.
+- **Pinned by:** `test_search_tools.TestScoreTool` +
+  `test_agent.TestAlbumSearch`.
 
 ---
 
 ### Honourable mentions (not defects, just legacy shape)
 
-- GOOD_SCORE break only fires when `len(info) > 1` (`__init__.py:132,355`) — a
-  lone 98-score result doesn't break (moot, it's the last row anyway, but the
-  condition is load-bearing in tests):
-  `test_agent.TestAlbumSearch.test_search_breaks_on_good_score`,
-  `test_manual_keeps_below_good_score`.
+- GOOD_SCORE break only fires when `len(info) > 1` (`__init__.py`) — a lone
+  98-score result doesn't break (moot, it's the last row anyway).
 - Score sums use `reduce` (shadowed by `ScoreTool.reduce_string` method name)
-  with a comment claiming builtin `sum()` "isn't available" under Plex — it is;
-  the restriction was the old Plex sandbox.
+  with a comment claiming builtin `sum()` "isn't available" under Plex — it
+  is; the restriction was the old Plex sandbox.
 - `IGNORE_SCORE = 45`: results below it are logged but never appended
-  (`search_tools.py:628`):
-  `test_search_tools.TestScoreTool.test_score_below_ignore_boundary_skipped`.
+  (`search_tools.py`).

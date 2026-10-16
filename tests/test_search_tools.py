@@ -1,34 +1,54 @@
 # -*- coding: utf-8 -*-
-"""Tests for Contents/Code/search_tools.py against recorded legacy fixtures."""
+"""Tests for Contents/Code/search_tools.py against AudiobookDB fixtures."""
 
 import os
 import sys
 import json
 import unittest
-from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import plex_shim  # noqa: F401,E402  (framework fakes must load first)
 
-from plex_shim import Log, Prefs, _Results  # noqa: E402
+from plex_shim import Prefs, _Results, _HTTPRequest  # noqa: E402
 
+import api_client  # noqa: E402
 from search_tools import (  # noqa: E402
     SearchTool, AlbumSearchTool, ArtistSearchTool, ScoreTool,
 )
 
-FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
+# Zero the inter-attempt sleep so failure-path tests are fast.
+api_client.DEFAULT_RETRY_AFTER = 0
+
+BASE = api_client.BASE_URL
+FIXTURES = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'audiobookdb')
 
 
 def load_fixture(name):
-    """Load a legacy fixture; json.loads is patched (viewkeys dicts)."""
-    with open(os.path.join(FIXTURES, 'legacy', name), 'rb') as f:
+    with open(os.path.join(FIXTURES, name), 'rb') as f:
         return json.loads(f.read().decode('utf-8'))
 
 
-def as_legacy_dicts(obj):
-    """Round-trip through patched json.loads so dicts get ``viewkeys()``."""
-    return json.loads(json.dumps(obj))
+def api_body(payload):
+    """Serialize a fixture payload the way the wire transport does."""
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def install_transport(mapping, default=''):
+    """Map URL -> (status, body); records requests on HTTP.requests."""
+    def transport(url, method='GET', headers=None, data=None):
+        if url in mapping:
+            status, body = mapping[url]
+        else:
+            status, body = 404, default
+        return _HTTPRequest(status, body)
+    plex_shim.HTTP.Reset()
+    plex_shim.HTTP.Headers = {}
+    plex_shim.HTTP.Headers['X-API-Key'] = 'anonymous'
+    plex_shim.HTTP.transport = transport
+    Prefs['logging_level'] = 'ERROR'
+    return transport
 
 
 class FakeMedia(object):
@@ -44,7 +64,6 @@ class FakeMedia(object):
 
 
 def make(content_type, media=None, manual=False):
-    Prefs['region'] = 'us'
     Prefs['logging_level'] = 'INFO'
     return SearchTool(
         content_type, plex_shim.Locale.Language.English, manual,
@@ -52,7 +71,6 @@ def make(content_type, media=None, manual=False):
 
 
 def make_album(media=None, manual=False):
-    Prefs['region'] = 'us'
     Prefs['logging_level'] = 'INFO'
     return AlbumSearchTool(
         'books', plex_shim.Locale.Language.English, manual,
@@ -60,7 +78,6 @@ def make_album(media=None, manual=False):
 
 
 def make_artist(media=None, manual=False):
-    Prefs['region'] = 'us'
     Prefs['logging_level'] = 'INFO'
     return ArtistSearchTool(
         'authors', plex_shim.Locale.Language.English, manual,
@@ -73,80 +90,158 @@ class FakeScoreHelper(object):
         self.lang = lang if lang is not None else plex_shim.Locale.Language.English
 
 
-class TestSearchToolBuildUrl(unittest.TestCase):
-    def test_books_build_url(self):
-        tool = make_album(FakeMedia(album='The Martian', artist='Andy Weir'))
-        tool.normalize_name()
-        url = tool.build_url('title=The%20Martian')
-        self.assertEqual(
-            url,
-            'https://api.audible.com/1.0/catalog/products'
-            '?response_groups=contributors,product_desc,product_attrs'
-            '&num_results=25&products_sort_by=Relevance&title=The%20Martian'
-        )
+class TestCheckForAsinBooks(unittest.TestCase):
+    """Quick-match book appends (legacy ASIN and native IDs)."""
 
-    def test_authors_build_url(self):
-        tool = make('authors', FakeMedia(artist='Andy Weir'))
-        url = tool.build_url('name=Andy%20Weir')
-        self.assertEqual(
-            url, 'https://api.audnex.us/authors?region=us&name=Andy%20Weir'
-        )
-
-    def test_build_url_asin_override_books(self):
-        tool = make_album(FakeMedia(
-            album='The Martian B00B5HZGUG', artist='Andy Weir'))
-        tool.normalize_name()
-        url = tool.build_url('ignored')
-        self.assertEqual(
-            url,
-            'https://api.audible.com/1.0/catalog/products'
-            '?response_groups=contributors,product_desc,product_attrs'
-            '&num_results=25&products_sort_by=Relevance'
-            '&&keywords=B00B5HZGUG'
-        )
-
-
-class TestSearchToolCheckForAsin(unittest.TestCase):
-    def test_books_from_filename(self):
+    def test_books_from_filename_appends_score_100(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/B00B5HZGUG':
+                (200, api_body(load_fixture(
+                    'book_external_resolve_B00B5HZGUG.json'))),
+        })
         tool = make('books', FakeMedia(filename='the%20martian%20B00B5HZGUG'))
-        self.assertEqual(tool.check_for_asin(), 'B00B5HZGUG_us')
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(len(tool.results.appended), 1)
+        r = tool.results.appended[0]
+        self.assertEqual(r.id, 'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        self.assertEqual(r.name, 'The Martian')
+        self.assertEqual(r.score, 100)
+        self.assertEqual(r.year, 2011)
 
-    def test_books_from_manual(self):
+    def test_books_from_manual_album(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/B00B5HZGUG':
+                (200, api_body(load_fixture(
+                    'book_external_resolve_B00B5HZGUG.json'))),
+        })
         tool = make('books', FakeMedia(album='The Martian B00B5HZGUG'))
-        self.assertEqual(tool.check_for_asin(), 'B00B5HZGUG_us')
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended[0].id,
+                         'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
 
-    def test_artists_from_manual(self):
-        # Legacy quirk (LEGACY_ISSUES #3): artist quick-match returns
-        # ASIN_region even though artist result IDs are bare ASINs.
+    def test_native_book_id(self):
+        install_transport({
+            BASE + '/books/WQQDcMBQ3qUT': (
+                200, api_body(load_fixture('book_detail_WQQDcMBQ3qUT.json'))),
+        })
+        tool = make('books', FakeMedia(album='book.WQQDcMBQ3qUT'))
+        self.assertTrue(tool.check_for_asin())
+        r = tool.results.appended[0]
+        self.assertEqual(r.id, 'book.WQQDcMBQ3qUT')
+        self.assertEqual(r.name, 'The Martian')
+        self.assertEqual(r.year, 2011)
+
+    def test_native_book_release_id_pair(self):
+        install_transport({
+            BASE + '/books/WQQDcMBQ3qUT': (
+                200, api_body(load_fixture('book_detail_WQQDcMBQ3qUT.json'))),
+            BASE + '/releases/dPL9fC7YnK8X': (
+                200, api_body(load_fixture('release_detail_dPL9fC7YnK8X.json'))),
+        })
+        tool = make('books',
+                    FakeMedia(album='book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X'))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended[0].id,
+                         'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+
+    def test_release_mismatch_rejected(self):
+        other_release = load_fixture('release_detail_dPL9fC7YnK8X.json')
+        other_release['book'] = {'id': 'other'}
+        install_transport({
+            BASE + '/books/WQQDcMBQ3qUT': (
+                200, api_body(load_fixture('book_detail_WQQDcMBQ3qUT.json'))),
+            BASE + '/releases/dPL9fC7YnK8X': (200, api_body(other_release)),
+        })
+        tool = make('books',
+                    FakeMedia(album='book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X'))
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+
+    def test_book_404_returns_false(self):
+        install_transport({})
+        tool = make('books', FakeMedia(album='book.WQQDcMBQ3qUT'))
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+
+    def test_asin_404_returns_false(self):
+        install_transport({})
+        tool = make('books', FakeMedia(album='Nope B000000000'))
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+
+    def test_no_id_returns_false(self):
+        install_transport({})
+        tool = make('books', FakeMedia(album='The Martian'))
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        tool2 = make('books', FakeMedia())
+        self.assertFalse(tool2.check_for_asin())
+
+
+class TestCheckForAsinPeople(unittest.TestCase):
+    """Quick-match person appends (legacy ASIN and native IDs)."""
+
+    def test_artist_asin_manual_appends_person(self):
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2': (
+                200, api_body(
+                    load_fixture('person_external_resolve_B00G0WYW92.json'))),
+            BASE + '/people/ypMPwXzWXaiX': (
+                200, api_body(load_fixture('person_detail_ypMPwXzWXaiX.json'))),
+        })
+        tool = make('authors', FakeMedia(artist='Andy Weir B00G0WYW92'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(len(tool.results.appended), 1)
+        r = tool.results.appended[0]
+        self.assertEqual(r.id, 'person.ypMPwXzWXaiX')
+        self.assertEqual(r.name, 'Andy Weir')
+        self.assertEqual(r.score, 100)
+
+    def test_artist_asin_not_manual_skips(self):
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2': (
+                200, api_body(
+                    load_fixture('person_external_resolve_B00G0WYW92.json'))),
+            BASE + '/people/ypMPwXzWXaiX': (
+                200, api_body(load_fixture('person_detail_ypMPwXzWXaiX.json'))),
+        })
         tool = make('authors', FakeMedia(artist='Andy Weir B00G0WYW92'))
-        self.assertEqual(tool.check_for_asin(), 'B00G0WYW92_us')
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
 
-    def test_no_asin(self):
-        tool = make('books', FakeMedia(album='The Martian'))
-        self.assertIsNone(tool.check_for_asin())
+    def test_artist_404_returns_false(self):
+        install_transport({})
+        tool = make('authors', FakeMedia(artist='Nobody B000000000'),
+                    manual=True)
+        self.assertFalse(tool.check_for_asin())
 
-    def test_artist_manual_falls_back_to_album_none(self):
-        # No album, no artist -> search_asin(None) -> None
-        tool = make('authors', FakeMedia())
-        self.assertIsNone(tool.check_for_asin())
+    def test_native_person_id(self):
+        install_transport({
+            BASE + '/people/ypMPwXzWXaiX': (
+                200, api_body(load_fixture('person_detail_ypMPwXzWXaiX.json'))),
+        })
+        tool = make('authors', FakeMedia(artist='person.ypMPwXzWXaiX'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended[0].id, 'person.ypMPwXzWXaiX')
 
+    def test_native_person_id_404(self):
+        install_transport({})
+        tool = make('authors', FakeMedia(artist='person.ypMPwXzWXaiX'),
+                    manual=True)
+        self.assertFalse(tool.check_for_asin())
 
-class TestSearchToolRegion(unittest.TestCase):
-    def test_check_for_region_from_title(self):
-        tool = make('books', FakeMedia(album='The Martian [uk]'))
-        tool.check_for_region('The Martian [uk]')
-        self.assertEqual(tool.region_override, 'uk')
+    def test_book_id_rejected_for_authors(self):
+        install_transport({})
+        tool = make('authors', FakeMedia(artist='book.WQQDcMBQ3qUT'),
+                    manual=True)
+        self.assertFalse(tool.check_for_asin())
 
-    def test_check_for_region_default(self):
-        tool = make('books', FakeMedia(album='The Martian'))
-        tool.check_for_region('The Martian')
-        self.assertEqual(tool.region_override, 'us')
-
-    def test_search_region(self):
-        tool = make('books', FakeMedia())
-        self.assertEqual(tool.search_region('hello [uk] world').group(0), 'uk')
-        self.assertIsNone(tool.search_region('hello world'))
-        self.assertIsNone(tool.search_region(None))
+    def test_person_id_rejected_for_books(self):
+        install_transport({})
+        tool = make('books', FakeMedia(album='person.ypMPwXzWXaiX'))
+        self.assertFalse(tool.check_for_asin())
 
 
 class TestSearchToolHelpers(unittest.TestCase):
@@ -154,51 +249,6 @@ class TestSearchToolHelpers(unittest.TestCase):
         tool = make('books', FakeMedia())
         self.assertEqual(tool.clear_contributor_text('A - B'), 'A')
         self.assertEqual(tool.clear_contributor_text('Plain'), 'Plain')
-
-    def test_log_search_url(self):
-        tool = make('books', FakeMedia())
-        Prefs['logging_level'] = 'DEBUG'
-        Log.Clear()
-        tool.log_search_url('http://example.com/search')
-        self.assertEqual(
-            [e for e in Log.entries if e[0] == 'DEBUG'],
-            [('DEBUG', 'Search URL: %s', ('http://example.com/search',))]
-        )
-        Prefs['logging_level'] = 'INFO'
-
-    def test_override_with_asin_books(self):
-        # Legacy URL quirk: query param starts with '&' while the region
-        # params already end with '&', producing '&&keywords=' (pinned).
-        tool = make_album(FakeMedia(album='x B00B5HZGUG'))
-        match = tool.search_asin('B00B5HZGUG')
-        url = tool.override_with_asin(match, 'uk')
-        self.assertEqual(
-            url,
-            'https://api.audible.co.uk/1.0/catalog/products'
-            '?response_groups=contributors,product_desc,product_attrs'
-            '&num_results=25&products_sort_by=Relevance&&keywords=B00B5HZGUG'
-        )
-
-    def test_override_with_asin_authors(self):
-        tool = make('authors', FakeMedia(artist='x B00G0WYW92'))
-        match = tool.search_asin('B00G0WYW92')
-        url = tool.override_with_asin(match)
-        self.assertEqual(
-            url, 'https://api.audnex.us/authors/B00G0WYW92?region=us'
-        )
-
-    def test_pre_process_title_returns_url_on_asin(self):
-        tool = make_album(FakeMedia(
-            album='The Martian B00B5HZGUG', artist='Andy Weir'))
-        tool.normalize_name()
-        url = tool.pre_process_title()
-        self.assertIn('products_sort_by=Relevance&&keywords=B00B5HZGUG', url)
-        self.assertTrue(url.startswith('https://api.audible.com/'))
-
-    def test_pre_process_title_none_without_asin(self):
-        tool = make_album(FakeMedia(album='The Martian', artist='Andy Weir'))
-        tool.normalize_name()
-        self.assertIsNone(tool.pre_process_title())
 
     def test_search_asin(self):
         tool = make('books', FakeMedia())
@@ -223,29 +273,26 @@ class TestSearchToolHelpers(unittest.TestCase):
         self.assertEqual(tool.media.artist, 'Some Title')
 
 
-class TestAlbumSearchToolArgs(unittest.TestCase):
-    def test_build_search_args_with_artist(self):
+class TestAlbumSearchToolBody(unittest.TestCase):
+    def test_body_with_artist(self):
         tool = make_album(FakeMedia(album='The Martian', artist='Andy Weir'))
-        self.assertEqual(
-            tool.build_search_args(),
-            'title=The%20Martian&author=Andy%20Weir'
-        )
+        body = tool.build_search_body()
+        self.assertEqual(body['type'], 'books')
+        self.assertEqual(body['q'], 'The Martian')
+        self.assertEqual(body['filters'], {'person': 'Andy Weir'})
 
-    def test_build_search_args_without_artist(self):
+    def test_body_without_artist_no_filters(self):
         tool = make_album(FakeMedia(album='The Martian'))
-        self.assertEqual(tool.build_search_args(), 'keywords=The%20Martian')
+        body = tool.build_search_body()
+        self.assertEqual(body, {'q': 'The Martian', 'type': 'books'})
 
+    def test_body_too_short_returns_none(self):
+        tool = make_album(FakeMedia(album='ab'))
+        self.assertIsNone(tool.build_search_body())
 
-class TestAlbumSearchToolPreorder(unittest.TestCase):
-    def test_future_date_is_preorder(self):
+    def test_body_nothing_to_search_returns_none(self):
         tool = make_album(FakeMedia())
-        future = date(2099, 1, 1)
-        self.assertTrue(tool.check_if_preorder(future))
-
-    def test_past_date_not_preorder(self):
-        tool = make_album(FakeMedia())
-        past = date(2013, 3, 22)
-        self.assertIsNone(tool.check_if_preorder(past))
+        self.assertIsNone(tool.build_search_body())
 
 
 class TestNameToInitials(unittest.TestCase):
@@ -284,44 +331,40 @@ class TestNormalizeName(unittest.TestCase):
 
 
 class TestAlbumParseApiResponse(unittest.TestCase):
-    def test_fixture_products(self):
+    def test_fixture_hits(self):
         tool = make_album(FakeMedia())
-        tool.region_override = 'us'
-        results = tool.parse_api_response(load_fixture('book_search.json'))
-        self.assertEqual(len(results), 2)
-        self.assertEqual(results[0]['asin'], 'B082BHJMFF_us')
-        self.assertEqual(results[0]['title'], 'The Martian')
-        self.assertEqual(results[0]['author'],
-                         [{'asin': 'B00G0WYW92', 'name': 'Andy Weir'}])
-        self.assertEqual(results[0]['date'], '2020-01-01')
-        self.assertEqual(results[0]['language'], 'english')
-        self.assertEqual(results[0]['narrator'], [{'name': 'Wil Wheaton'}])
-        self.assertEqual(results[0]['region'], 'us')
+        results = tool.parse_api_response(load_fixture('search_books_martian.json'))
+        # The decoy 'A Sidekick' hit comes first; WQQDcMBQ3qUT is index 1.
+        self.assertEqual(len(results), 10)
+        self.assertEqual(results[1]['book_id'], 'book.WQQDcMBQ3qUT')
+        self.assertEqual(results[1]['title'], 'The Martian')
+        self.assertEqual(results[1]['author'], [{'name': 'Andy Weir'}])
+        self.assertEqual(results[1]['narrator'], [])
+        self.assertIsNone(results[1]['date'])
+        self.assertEqual(results[1]['language'], 'English')
+        self.assertIsNone(results[1]['subtitle'])
 
     def test_missing_required_keys_rejected(self):
         tool = make_album(FakeMedia())
-        tool.region_override = 'us'
-        response = as_legacy_dicts({'products': [
-            {'asin': 'B000000000', 'title': 'Nope'},
-        ]})
-        self.assertEqual(tool.parse_api_response(response), [])
+        self.assertEqual(
+            tool.parse_api_response([
+                {'id': 'abc', 'title': 'Nope'},
+                {'title': 'No ID'},
+                {'id': 'abc', 'people': []},
+            ]), [])
 
-    def test_partial_keys_kept(self):
+    def test_non_dict_items_rejected(self):
         tool = make_album(FakeMedia())
-        tool.region_override = 'uk'
-        response = as_legacy_dicts({'products': [
-            {
-                'asin': 'B000000001',
-                'authors': [{'name': 'A'}],
-                'language': 'english',
-                'narrators': [{'name': 'N'}],
-                'release_date': '2020-01-01',
-                'title': 'Yes',
-            },
-        ]})
-        results = tool.parse_api_response(response)
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]['asin'], 'B000000001_uk')
+        self.assertEqual(tool.parse_api_response(['nope', None, 5]), [])
+
+    def test_no_narrator_role(self):
+        tool = make_album(FakeMedia())
+        results = tool.parse_api_response([
+            {'id': 'abc', 'title': 'T', 'people': [
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'p1', 'name': 'N N'}}]},
+        ])
+        self.assertEqual(results[0]['narrator'], [{'name': 'N N'}])
 
 
 class TestPreSearchLogging(unittest.TestCase):
@@ -349,10 +392,15 @@ class TestPreSearchLogging(unittest.TestCase):
         self.assertTrue(tool.pre_search_logging())
 
 
-class TestArtistSearchToolArgs(unittest.TestCase):
-    def test_build_search_args(self):
+class TestArtistSearchToolBody(unittest.TestCase):
+    def test_build_search_body(self):
         tool = make_artist(FakeMedia(artist='Andy Weir'))
-        self.assertEqual(tool.build_search_args(), 'name=Andy%20Weir')
+        self.assertEqual(
+            tool.build_search_body(), {'q': 'Andy Weir', 'type': 'people'})
+
+    def test_build_search_body_too_short_none(self):
+        tool = make_artist(FakeMedia(artist='Jo'))
+        self.assertIsNone(tool.build_search_body())
 
 
 class TestCleanupAuthorName(unittest.TestCase):
@@ -403,16 +451,16 @@ class TestArtistMultiArtist(unittest.TestCase):
 class TestArtistParseApiResponse(unittest.TestCase):
     def test_fixture(self):
         tool = make_artist(FakeMedia())
-        results = tool.parse_api_response(load_fixture('author_search.json'))
-        self.assertEqual(len(results), 25)
-        self.assertEqual(results[0], {'asin': 'B00G0WYW92',
-                                      'name': 'Andy Weir'})
+        results = tool.parse_api_response(
+            load_fixture('search_people_andy_weir.json'))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['id'], 'person.ypMPwXzWXaiX')
+        self.assertEqual(results[0]['name'], 'Andy Weir')
 
     def test_missing_keys_rejected(self):
         tool = make_artist(FakeMedia())
         self.assertEqual(
-            tool.parse_api_response(as_legacy_dicts(
-                [{'asin': 'B000000000'}])), [])
+            tool.parse_api_response([{'name': 'No ID'}]), [])
 
 
 class TestScoreTool(unittest.TestCase):
@@ -444,44 +492,58 @@ class TestScoreTool(unittest.TestCase):
     def test_run_score_author_perfect_match(self):
         media = FakeMedia(artist='Andy Weir')
         tool, info = self._score(
-            {'asin': 'B00G0WYW92_us', 'name': 'Andy Weir'}, media=media)
+            {'id': 'person.ypMPwXzWXaiX', 'name': 'Andy Weir'}, media=media)
         tool.run_score_author()
         self.assertEqual(len(info), 1)
-        self.assertEqual(info[0]['id'], 'B00G0WYW92_us')
+        self.assertEqual(info[0]['id'], 'person.ypMPwXzWXaiX')
         self.assertEqual(info[0]['author'], 'Andy Weir')
         self.assertEqual(info[0]['score'], 100)
 
     def test_run_score_book_perfect_match(self):
         media = FakeMedia(album='The Martian', artist='Andy Weir')
         result = {
-            'asin': 'B00B5HZGUG_us',
+            'book_id': 'book.WQQDcMBQ3qUT',
             'author': [{'name': 'Andy Weir'}],
-            'date': '2013-03-22',
-            'language': 'english',
+            'date': None,
+            'language': 'English',
             'narrator': [{'name': 'R. C. Bray'}],
-            'region': 'us',
             'title': 'The Martian',
         }
-        tool, info = self._score(result, media=media, year=2013)
+        tool, info = self._score(result, media=media, year=2011)
         tool.run_score_book()
         self.assertEqual(len(info), 1)
-        self.assertEqual(info[0]['id'], 'B00B5HZGUG_us')
+        self.assertEqual(info[0]['id'], 'book.WQQDcMBQ3qUT')
         self.assertEqual(info[0]['score'], 100)
-        self.assertEqual(info[0]['date'], '2013-03-22')
         self.assertEqual(info[0]['narrator'], 'R. C. Bray')
-        self.assertEqual(info[0]['region'], 'us')
         self.assertEqual(info[0]['title'], 'The Martian')
-        self.assertEqual(info[0]['year'], 2013)
+        self.assertEqual(info[0]['year'], 2011)
+        self.assertNotIn('date', info[0])
+        self.assertNotIn('region', info[0])
+
+    def test_run_score_book_empty_people(self):
+        media = FakeMedia(album='The Martian')
+        result = {
+            'book_id': 'book.WQQDcMBQ3qUT',
+            'author': [],
+            'date': None,
+            'language': 'English',
+            'narrator': [],
+            'title': 'The Martian',
+        }
+        tool, info = self._score(result, media=media)
+        tool.run_score_book()
+        self.assertEqual(len(info), 1)
+        # Empty author list skips author scoring entirely.
+        self.assertEqual(info[0]['score'], 100)
 
     def test_score_below_ignore_boundary_skipped(self):
         media = FakeMedia(album='The Martian', artist='Andy Weir')
         result = {
-            'asin': 'B000000000_us',
+            'book_id': 'book.hPaWwDcciGQE',
             'author': [{'name': 'Frank Herbert'}],
-            'date': '1965-01-01',
-            'language': 'english',
+            'date': None,
+            'language': 'English',
             'narrator': [{'name': 'N'}],
-            'region': 'us',
             'title': 'Dune Messiah The Golden',
         }
         tool, info = self._score(result, media=media)
@@ -491,22 +553,20 @@ class TestScoreTool(unittest.TestCase):
     def test_index_penalty(self):
         media = FakeMedia(album='The Martian', artist='Andy Weir')
         result = {
-            'asin': 'B000000000_us',
+            'book_id': 'book.WQQDcMBQ3qUT',
             'author': [{'name': 'Andy Weir'}],
-            'date': '2013-03-22',
-            'language': 'english',
+            'date': None,
+            'language': 'English',
             'narrator': [{'name': 'N'}],
-            'region': 'us',
             'title': 'The Martian',
         }
         _, info = self._score(result, index=3, media=media)
-        info2 = []
-        tool2 = ScoreTool(
-            FakeScoreHelper(media), 3, info2,
+        tool = ScoreTool(
+            FakeScoreHelper(media), 3, info,
             plex_shim.Locale.Language.English,
             plex_shim.Util.LevenshteinDistance, result, None)
-        tool2.run_score_book()
-        self.assertEqual(info2[0]['score'], 97)
+        tool.run_score_book()
+        self.assertEqual(info[0]['score'], 97)
 
     def test_score_album_no_album(self):
         media = FakeMedia()
@@ -526,14 +586,17 @@ class TestScoreTool(unittest.TestCase):
     def test_language_deduction(self):
         media = FakeMedia(album='The Martian', artist='Andy Weir')
         result = {
-            'asin': 'B000000000_us',
+            'book_id': 'book.WQQDcMBQ3qUT',
             'author': [{'name': 'Andy Weir'}],
-            'date': '2013-03-22',
-            'language': 'german',
+            'date': None,
+            'language': 'German',
             'narrator': [{'name': 'N'}],
-            'region': 'us',
             'title': 'The Martian',
         }
         tool, info = self._score(result, media=media)
         tool.run_score_book()
         self.assertEqual(info[0]['score'], 98)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,10 +1,8 @@
 # Import internal tools
 from logging import Logging
-from region_tools import RegionTool
+import api_client
+import metadata_ids
 import re
-import struct
-import urllib
-import os
 
 # Setup logger
 log = Logging()
@@ -18,21 +16,50 @@ class UpdateTool:
         self.media = media
         self.metadata = metadata
         self.prefs = prefs
-        self.region = self.extract_region_from_id()
+        # Parse the stored ID once; resolution branches on this 3-tuple.
+        self.parsed_id = metadata_ids.parse_metadata_id(
+            metadata.id, self.content_type)
+        # Native IDs stashed by resolve_item for the agent's ID commit.
+        self.native_book_id = None
+        self.native_release_id = None
+        self.native_person_id = None
 
-    def build_url(self):
+    def select_release(self, book, pinned_release_id=None,
+                       matched_release_id=None):
         """
-            Builds the URL for the API request.
+            Shared release-selection precedence:
+              (1) release pinned in a native ID
+              (2) matchedReleaseId from an ASIN resolve
+              (3) the only release in book['releases']
+              (4) lexicographically lowest release id (deterministic default)
+              (5) None -> work-only path
+            Returns a release id or None.
         """
-        # Get the current region
-        self.region_override = self.get_preferred_region()
-        # Set the region helper
-        region_helper = RegionTool(
-            region=self.region_override, content_type=self.content_type, id=self.extract_asin_from_id())
+        releases = book.get('releases') or []
+        ids = [r['id'] for r in releases]
+        if pinned_release_id and pinned_release_id in ids:
+            return pinned_release_id
+        if matched_release_id and matched_release_id in ids:
+            return matched_release_id
+        if len(releases) == 1:
+            return releases[0]['id']
+        if releases:
+            selected = min(ids)
+            log.info('No matched release; defaulting to lowest release ID: %s'
+                     % selected)
+            return selected
+        return None
 
-        update_url = region_helper.get_id_url()
-        log.debug('Update URL: ' + update_url)
-        return update_url
+    def getDateFromString(self, string):
+        """
+            Converts a string to a date object.
+        """
+        try:
+            return Datetime.ParseDate(string).date()
+        except AttributeError:
+            return None
+        except ValueError:
+            return None
 
     def cleanup_html(self):
         """
@@ -77,7 +104,7 @@ class UpdateTool:
             Collects the metadata to log.
         """
         # Start an array with common metadata
-        data_to_log = [{'ASIN': self.metadata.id}]
+        data_to_log = [{'ID': self.metadata.id}]
 
         # Determine which metadata to log
         if self.content_type == 'books':
@@ -125,42 +152,6 @@ class UpdateTool:
 
         return multi_arr
 
-    def extract_asin_from_id(self):
-        """
-            Extracts the ASIN from the ID.
-        """
-        # Get the ASIN from the ID
-        asin = self.metadata.id.split('_')[0]
-        log.debug('Extracted ASIN from ID: ' + asin)
-        return asin
-
-    def extract_region_from_id(self):
-        """
-            Extracts the region from the ASIN and sets the region.
-        """
-        # Get the region from the ASIN
-        try:
-            region = self.metadata.id.split('_')[1]
-            log.debug('Extracted region from ASIN: ' + region)
-        except IndexError:
-            log.info('No region found in ID, using default region.')
-            region = self.get_preferred_region()
-            # Save the region to the ID
-            self.metadata.id = self.metadata.id + '_' + region
-        # Set region and ASIN
-        return region
-
-    def get_preferred_region(self):
-        """
-            Get the preferred region from class or preferences.
-        """
-        try:
-            region = self.region
-        except AttributeError:
-            region = self.prefs['region']
-        log.info('Preferred region: ' + region)
-        return region
-
     def log_update_metadata(self):
         """
             Writes metadata information to log.
@@ -186,46 +177,132 @@ class UpdateTool:
 
 
 class AlbumUpdateTool(UpdateTool):
-    def parse_api_response(self, response):
+    def resolve_item(self):
         """
-            Parses keys from API into helper variables if they exist.
+            Resolves the stored ID to a book (+ optional release) and
+            populates the helper. Returns True on success; on any failure
+            leaves metadata untouched and returns False.
+        """
+        kind = self.parsed_id[0]
+
+        # a. invalid / native-but-wrong-type
+        if kind == 'invalid':
+            log.info(
+                'ID %s is not a valid %s ID; leaving metadata untouched.'
+                % (self.metadata.id, self.content_type))
+            return False
+
+        book = None
+        release = None
+        release_id = None
+
+        if kind == 'legacy':
+            # b. legacy ASIN
+            asin = self.parsed_id[1]
+            book, matched_release_id = api_client.resolve_asin_book(asin)
+            if book is None:
+                log.info(
+                    'ASIN %s not in AudiobookDB catalog; use Fix Match or '
+                    'add the external link to AudiobookDB.' % asin)
+                return False
+            release_id = self.select_release(
+                book, matched_release_id=matched_release_id)
+            if release_id:
+                release = api_client.get_release(release_id)
+        elif kind == 'book':
+            book_id, pinned_release_id = self.parsed_id[1], self.parsed_id[2]
+            if pinned_release_id:
+                # c. book.<id>.release.<id>
+                release = api_client.get_release(pinned_release_id)
+                if release is None:
+                    log.info(
+                        'Release %s not found; leaving metadata untouched '
+                        '(require rematching).' % pinned_release_id)
+                    return False
+                book_id = (release.get('book') or {}).get('id')
+                book = api_client.get_book(book_id)
+                release_id = pinned_release_id
+            else:
+                # d. book.<id>
+                book = api_client.get_book(book_id)
+                if book is None:
+                    log.info(
+                        'Book %s not found; leaving metadata untouched.'
+                        % book_id)
+                    return False
+                release_id = self.select_release(book)
+                if release_id:
+                    release = api_client.get_release(release_id)
+            if book is None:
+                return False
+
+        # e. population
+        self.native_book_id = book['id']
+        self.native_release_id = release_id
+        self.parse_api_response(book, release)
+        return True
+
+    def parse_api_response(self, book, release):
+        """
+            Parses the book and release into helper variables, defaulting
+            every nullable field before conditional assignment.
         """
         self.set_empty_variables()
 
-        if 'authors' in response:
-            self.author = response['authors']
-        if 'releaseDate' in response:
-            self.date = response['releaseDate']
-        if 'genres' in response:
-            self.genres = response['genres']
-        if 'narrators' in response:
-            self.narrator = response['narrators']
-        if 'rating' in response:
-            self.rating = response['rating']
-        if 'seriesPrimary' in response:
-            self.series = response['seriesPrimary']['name']
-            if 'position' in response['seriesPrimary']:
-                self.volume = self.volume_prefix(
-                    response['seriesPrimary']['position']
-                )
-        if 'seriesSecondary' in response:
-            self.series2 = response['seriesSecondary']['name']
-            if 'position' in response['seriesSecondary']:
-                self.volume2 = self.volume_prefix(
-                    response['seriesSecondary']['position']
-                )
-        if 'publisherName' in response:
-            self.studio = response['publisherName']
-        if 'summary' in response:
-            self.synopsis = response['summary']
-        if 'image' in response:
-            self.thumb = response['image']
-        if 'similar' in response:
-            self.similar = response['similar']
-        if 'subtitle' in response:
-            self.subtitle = response['subtitle']
-        if 'title' in response:
-            self.title = response['title']
+        self.title = book.get('title') or ''
+        self.subtitle = book.get('subtitle') or ''
+        self.synopsis = book.get('description') or ''
+        self.author = [
+            {'name': p['person']['name']}
+            for p in book.get('people') or []
+            if p['role']['name'] == 'Author'
+        ]
+        self.narrator = []
+        if release:
+            self.narrator = [
+                {'name': p['person']['name']}
+                for p in release.get('people') or []
+                if p['role']['name'] == 'Narrator'
+            ]
+        self.studio = ((release.get('publisher') or {}).get('name')
+                       or '') if release else ''
+        self.date = (self.getDateFromString(release.get('releaseDate'))
+                     if release else None)
+        self.genres = [{'name': g['title']} for g in book.get('genres') or []]
+
+        # Rating: select the audible chip specifically (never by position).
+        self.rating = None
+        for chip in api_client.get_ratings(book['id']):
+            if chip.get('source') == 'audible' \
+                    and chip.get('average') is not None:
+                self.rating = chip['average']
+                break
+
+        # Series from book['series'][0]/[1].
+        series_list = book.get('series') or []
+        if len(series_list) > 0:
+            entry = series_list[0]
+            self.series = entry['series']['title']
+            self.volume = self.series_volume(entry)
+        if len(series_list) > 1:
+            entry = series_list[1]
+            self.series2 = entry['series']['title']
+            self.volume2 = self.series_volume(entry)
+
+        # Thumb from coverImage (sized derivative).
+        cover = book.get('coverImage')
+        self.thumb = (cover['url'] + '/large.jpg') if cover else ''
+        self.similar = None
+
+    def series_volume(self, entry):
+        """
+            Returns the prefixed volume label for a series entry, or '' when
+            the position is absent or has no label.
+        """
+        pos = entry.get('position') or {}
+        if pos.get('status') != 'absent' and pos.get('label'):
+            return self.volume_prefix(pos['label'])
+        return ''
 
     def set_metadata_date(self):
         """
@@ -239,14 +316,18 @@ class AlbumUpdateTool(UpdateTool):
         """
             Sets empty variables.
         """
+        self.author = []
         self.date = None
         self.genres = None
+        self.narrator = []
         self.rating = None
         self.series = ''
         self.series2 = ''
         self.similar = None
+        self.studio = ''
         self.subtitle = ''
         self.thumb = ''
+        self.title = ''
         self.volume = ''
         self.volume2 = ''
 
@@ -359,93 +440,83 @@ class AlbumUpdateTool(UpdateTool):
 
 
 class ArtistUpdateTool(UpdateTool):
-    def get_square_image(self, image_url):
+    def resolve_item(self):
         """
-            Get square author photos from Audible
-
-            Crop each portrait photo to a square centered at the top,
-            and crop each landscape photo to a square at the horizontal center
+            Resolves the stored ID to a person and populates the helper.
+            Returns True on success; on any failure leaves metadata
+            untouched and returns False.
         """
-        try:
-            image_file_dl = urllib.urlopen(image_url)
-            image_file_dl_contents = image_file_dl.read()
-            image_file_dl.close()
+        kind = self.parsed_id[0]
 
-            image_file = os.tmpfile()
-            image_file.write(image_file_dl_contents)
+        # a. invalid / native-but-wrong-type
+        if kind == 'invalid':
+            log.info(
+                'ID %s is not a valid %s ID; leaving metadata untouched.'
+                % (self.metadata.id, self.content_type))
+            return False
 
-            image_file.seek(0)
+        person = None
+        if kind == 'legacy':
+            # b. legacy ASIN
+            asin = self.parsed_id[1]
+            hits = api_client.resolve_asin_person(asin)
+            if len(hits) == 0:
+                log.info(
+                    'ASIN %s not in AudiobookDB catalog; use Fix Match or '
+                    'add the external link to AudiobookDB.' % asin)
+                return False
+            if len(hits) > 1:
+                log.info(
+                    'ASIN %s is ambiguous (%d people); leaving metadata '
+                    'untouched.' % (asin, len(hits)))
+                return False
+            candidate = hits[0]['id']
+            person = api_client.get_person(candidate)
+            if person is None:
+                return False
+            confirmed = False
+            for ext in person.get('external') or []:
+                if ext.get('itemId') == asin and (
+                        ext.get('category') or {}).get('title') == 'Audible':
+                    confirmed = True
+                    break
+            if not confirmed:
+                log.info(
+                    'Person %s does not confirm ASIN %s; leaving metadata '
+                    'untouched.' % (candidate, asin))
+                return False
+        elif kind == 'person':
+            # c. person.<id>
+            person_id = self.parsed_id[1]
+            person = api_client.get_person(person_id)
+            if person is None:
+                log.info(
+                    'Person %s not found; leaving metadata untouched.'
+                    % person_id)
+                return False
 
-            head = image_file.read(24)
-            if len(head) != 24:
-                image_file.close()
-                return image_url
+        # d. population
+        self.native_person_id = person['id']
+        self.parse_api_response(person)
+        self.metadata.id = metadata_ids.serialize_person_id(person['id'])
+        return True
 
-            image_file.seek(0)  # Read 0xff next
-            size = 2
-            ftype = 0
-            while not 0xc0 <= ftype <= 0xcf:
-                image_file.seek(size, 1)
-                byte = image_file.read(1)
-                while ord(byte) == 0xff:
-                    byte = image_file.read(1)
-                ftype = ord(byte)
-                size = struct.unpack('>H', image_file.read(2))[0] - 2
-            # We are at a SOFn block
-            image_file.seek(1, 1)  # Skip `precision' byte.
-            height, width = struct.unpack('>HH', image_file.read(4))
-
-            image_file.close()
-
-            if (height > width):
-                # Return a portrait image centered at the top
-                w_str = str(width)
-                square_image_url = image_url.replace(
-                    '.jpg',
-                    '.__01_SX'+w_str+'_CR0,0,'+w_str+','+w_str+'__.jpg'
-                )
-                return square_image_url
-
-            if (width > height):
-                # Return a landscape image centered at the horizontal middle
-                h_str = str(height)
-                padding = str((width - height) / 2)
-                square_image_url = image_url.replace(
-                    '.jpg',
-                    '.__01_SY'+h_str+'_CR'+padding+',0,'+h_str+','+h_str+'__.jpg'
-                )
-                return square_image_url
-
-            return image_url
-
-        except Exception as err:
-            log.separator(
-                msg=(
-                    'Error getting square image for ' + self.media.title
-                ),
-                log_level="error"
-            )
-            log.error(err)
-        return image_url
-
-    def parse_api_response(self, response):
+    def parse_api_response(self, person):
         """
-            Parses keys from API into helper variables if they exist.
+            Parses the person into helper variables, defaulting every
+            nullable field before conditional assignment.
         """
         self.set_empty_variables()
 
-        if 'description' in response:
-            self.description = response['description']
-        if 'genres' in response:
-            self.genres = response['genres']
-        if 'name' in response:
-            self.name = response['name']
-        if 'image' in response:
-            squared_image = self.get_square_image(response['image'])
-            log.debug('Square image: ' + squared_image)
-            self.thumb = squared_image
-        if 'similar' in response:
-            self.similar = response['similar']
+        self.name = person.get('name') or ''
+        self.description = person.get('description') or ''
+        self.genres = [{'name': g['title']} for g in person.get('genres') or []]
+        images = person.get('images') or []
+        if images and images[0].get('url'):
+            self.thumb = images[0]['url'] + '/large.jpg'
+        else:
+            self.thumb = ''
+        self.similar = None
 
     def set_metadata_description(self):
         """
@@ -460,7 +531,9 @@ class ArtistUpdateTool(UpdateTool):
             Sets empty variables.
         """
         self.date = None
+        self.description = ''
         self.genres = None
+        self.name = ''
         self.similar = None
         self.thumb = ''
 

@@ -1,11 +1,11 @@
-# Audnexus Agent
+# AudiobookDB Agent
 # coding: utf-8
-import json
 # Import internal tools
 from _version import version
 from logging import Logging
+import api_client
 from search_tools import AlbumSearchTool, ArtistSearchTool, ScoreTool
-from time import sleep
+import metadata_ids
 from update_tools import AlbumUpdateTool, ArtistUpdateTool
 
 VERSION_NO = version
@@ -24,22 +24,19 @@ def ValidatePrefs():
 def Start():
     HTTP.ClearCache()
     HTTP.CacheTime = CACHE_1WEEK
-    HTTP.Headers['User-agent'] = (
-        'Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.2; Trident/4.0;'
-        'SLCC2; .NET CLR 2.0.50727; .NET CLR 3.5.30729; .NET CLR 3.0.30729;'
-        'Media Center PC 6.0'
-    )
+    HTTP.Headers['User-agent'] = api_client.USER_AGENT
+    HTTP.Headers['X-API-Key'] = Prefs['api_key'] or 'anonymous'
     HTTP.Headers['Accept-Encoding'] = 'gzip'
     log.separator(
         msg=(
-            "Audnexus Audiobooks Agent v" + VERSION_NO
+            "AudiobookDB Audiobooks Agent v" + VERSION_NO
         ),
         log_level="info"
     )
 
 
 class AudiobookArtist(Agent.Artist):
-    name = 'Audnexus Agent'
+    name = 'AudiobookDB Agent'
     languages = [
         Locale.Language.English,
         'de',
@@ -61,23 +58,9 @@ class AudiobookArtist(Agent.Artist):
         search_helper = ArtistSearchTool(
             'authors', lang, manual, media, Prefs, results)
 
-        # Check if we can quick match based on asin
-        quick_match_asin = search_helper.check_for_asin()
-
-        if quick_match_asin:
-            results.Append(
-                MetadataSearchResult(
-                    id=quick_match_asin,
-                    lang=lang,
-                    name=quick_match_asin,
-                    score=100,
-                    year=1969
-                )
-            )
-            log.info(
-                'Using quick match based on asin: '
-                '%s' % quick_match_asin
-            )
+        # Check if we can quick match based on ID (native or legacy ASIN).
+        # The helper appends the result(s) itself.
+        if search_helper.check_for_asin():
             return
 
         # Validate author name
@@ -153,24 +136,24 @@ class AudiobookArtist(Agent.Artist):
         update_helper = ArtistUpdateTool(
             'authors', force, lang, media, metadata, Prefs)
 
-        self.call_item_api(update_helper)
+        # Resolve the stored ID to a person; leave metadata untouched on
+        # any failure (unresolvable legacy ASIN, 404, ambiguous match).
+        if not update_helper.resolve_item():
+            return
 
         self.compile_metadata(update_helper)
 
     def call_search_api(self, helper):
         """
-            Builds URL then calls API, returns the JSON to helper function.
+            Calls the AudiobookDB search API, returns the parsed results
+            to the helper function.
         """
-        query = helper.build_search_args()
-        search_url = helper.build_url(query)
-        request = str(make_request(search_url))
-        response = json_decode(request)
-        # When using asin match, put it into array
-        if isinstance(response, list):
-            arr_to_pass = response
-        else:
-            arr_to_pass = [response]
-        results_list = helper.parse_api_response(arr_to_pass)
+        body = helper.build_search_body()
+        if not body:
+            return []
+        response = api_client.search(
+            body.get('q'), body['type'], body.get('filters'))
+        results_list = helper.parse_api_response(response)
         return results_list
 
     def process_results(self, helper, result):
@@ -199,16 +182,6 @@ class AudiobookArtist(Agent.Artist):
         info = sorted(info, key=lambda inf: inf['score'], reverse=True)
         return info
 
-    def call_item_api(self, helper):
-        """
-            Calls Audnexus API to get author details,
-            then calls helper to parse those details.
-        """
-        update_url = helper.build_url()
-        request = str(make_request(update_url))
-        response = json_decode(request)
-        helper.parse_api_response(response)
-
     def compile_metadata(self, helper):
         """
             Compiles the metadata for the artist.
@@ -226,14 +199,16 @@ class AudiobookArtist(Agent.Artist):
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
                 helper.metadata.posters[helper.thumb] = Proxy.Media(
-                    make_request(helper.thumb), sort_order=0
+                    api_client.fetch_bytes(helper.thumb), sort_order=0
                 )
 
+        # Commit the native ID (done in resolve_item, which sets
+        # metadata.id on success).
         helper.log_update_metadata()
 
 
 class AudiobookAlbum(Agent.Album):
-    name = 'Audnexus Agent'
+    name = 'AudiobookDB Agent'
     languages = [
         Locale.Language.English,
         'de',
@@ -261,22 +236,9 @@ class AudiobookAlbum(Agent.Album):
             log.debug("Didn't pass pre-check")
             return
 
-        # Check if we can quick match based on asin
-        quick_match_asin = search_helper.check_for_asin()
-        if quick_match_asin:
-            results.Append(
-                MetadataSearchResult(
-                    id=quick_match_asin,
-                    lang=lang,
-                    name=quick_match_asin,
-                    score=100,
-                    year=1969
-                )
-            )
-            log.info(
-                'Using quick match based on asin: '
-                '%s' % quick_match_asin
-            )
+        # Check if we can quick match based on ID (native or legacy ASIN).
+        # The helper appends the result itself.
+        if search_helper.check_for_asin():
             return
 
         # # Validate author name
@@ -312,7 +274,8 @@ class AudiobookAlbum(Agent.Album):
         local_separators = separator_dict[lang]
         log.debug(
             'Using localized separators "%s" and "%s"',
-            local_separators['T_A'], local_separators['A_N']
+            local_separators['T_A'],
+            local_separators['A_N']
         )
 
         # Output the final results.
@@ -326,9 +289,11 @@ class AudiobookAlbum(Agent.Album):
                 r['title']) > 36 else r['title']
 
             # Shorten artist
-            artist_initials = search_helper.name_to_initials(r['author'])
+            artist_initials = search_helper.name_to_initials(
+                r.get('author') or '')
             # Shorten narrator
-            narrator_initials = search_helper.name_to_initials(r['narrator'])
+            narrator_initials = search_helper.name_to_initials(
+                r.get('narrator') or '')
 
             description = '\"%s\" %s %s %s %s' % (
                 title_trunc,
@@ -343,7 +308,7 @@ class AudiobookAlbum(Agent.Album):
                     lang=lang,
                     name=description,
                     score=r['score'],
-                    year=r['year']
+                    year=r.get('year')
                 )
             )
 
@@ -376,18 +341,23 @@ class AudiobookAlbum(Agent.Album):
         update_helper = AlbumUpdateTool(
             'books', force, lang, media, metadata, Prefs)
 
-        self.call_item_api(update_helper)
+        # Resolve the stored ID to a book (+release); leave metadata
+        # untouched on any failure (unresolvable legacy ASIN, 404).
+        if not update_helper.resolve_item():
+            return
 
         self.compile_metadata(update_helper)
 
     def call_search_api(self, helper):
         """
-            Builds URL then calls API, returns the JSON to helper function.
+            Calls the AudiobookDB search API, returns the parsed results
+            to the helper function.
         """
-        query = helper.build_search_args()
-        search_url = helper.build_url(query)
-        request = str(make_request(search_url))
-        response = json_decode(request)
+        body = helper.build_search_body()
+        if not body:
+            return []
+        response = api_client.search(
+            body.get('q'), body['type'], body.get('filters'))
         results_list = helper.parse_api_response(response)
         return results_list
 
@@ -404,10 +374,6 @@ class AudiobookAlbum(Agent.Album):
             year = ''
             if date is not None:
                 year = date.year
-
-                # Make sure this isn't a pre-order listing
-                if helper.check_if_preorder(date):
-                    continue
 
             score_helper = ScoreTool(
                 helper,
@@ -426,19 +392,6 @@ class AudiobookAlbum(Agent.Album):
 
         info = sorted(info, key=lambda inf: inf['score'], reverse=True)
         return info
-
-    def call_item_api(self, helper):
-        """
-            Calls Audnexus API to get book details,
-            then calls helper to parse those details.
-        """
-        update_url = helper.build_url()
-        request = str(make_request(update_url))
-        response = json_decode(request)
-        helper.parse_api_response(response)
-
-        # Set date to date object
-        helper.date = self.getDateFromString(helper.date)
 
     def compile_metadata(self, helper):
         """
@@ -461,12 +414,16 @@ class AudiobookAlbum(Agent.Album):
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
                 helper.metadata.posters[helper.thumb] = Proxy.Media(
-                    make_request(helper.thumb), sort_order=0
+                    api_client.fetch_bytes(helper.thumb), sort_order=0
                 )
                 # Re-prioritize the poster to the first position
                 helper.metadata.posters.validate_keys([helper.thumb])
         # Rating.
         helper.set_metadata_rating()
+
+        # Commit the native ID last (after every setter succeeded).
+        helper.metadata.id = metadata_ids.serialize_book_id(
+            helper.native_book_id, helper.native_release_id)
 
         # Log the resulting metadata
         helper.log_update_metadata()
@@ -481,42 +438,3 @@ class AudiobookAlbum(Agent.Album):
             return None
         except ValueError:
             return None
-
-
-# Common helpers
-
-def json_decode(output):
-    """
-        Decodes JSON output.
-    """
-    try:
-        return json.loads(output, encoding="utf-8")
-    except AttributeError:
-        return None
-
-
-def make_request(url):
-    """
-        Makes and returns an HTTP request.
-        Retries 4 times, increasing  time between each retry.
-    """
-    sleep_time = 1
-    num_retries = 4
-    for x in range(0, num_retries):
-        try:
-            make_request = HTTP.Request(url, timeout=90, sleep=sleep_time)
-            str_error = None
-            ssl_error = None
-        except Exception as str_error:
-            log.error("Failed http request attempt #" + x + ": " + url)
-            log.error(str_error)
-        except SSLError as ssl_error:
-            log.error("Failed http request attempt #" + x + ": " + url)
-            log.error(ssl_error)
-
-        if str_error or ssl_error:
-            sleep(sleep_time)
-            sleep_time *= x
-        else:
-            break
-    return make_request

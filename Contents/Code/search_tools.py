@@ -1,15 +1,20 @@
-from datetime import date
 import re
+
 # Import internal tools
 from logging import Logging
-from region_tools import RegionTool
-import urllib
+import api_client
+import metadata_ids
 
 # Setup logger
 log = Logging()
 
+# Py2/py3 urllib compat (filename unquoting)
+try:
+    import urllib.parse as _urlparse
+except ImportError:  # pragma: no cover - python 2
+    import urllib as _urlparse
+
 asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
-region_regex = re.compile(r'(?<=\[)[A-Za-z]{2}(?=\])')
 
 
 class SearchTool:
@@ -21,65 +26,182 @@ class SearchTool:
         self.prefs = prefs
         self.results = results
 
-    def build_url(self, query):
-        """
-            Generates the URL string with search paramaters for API call.
-        """
-        # Pre-process title. If ASIN is found, return the URL
-        pre_process = self.pre_process_title()
-        if pre_process:
-            return pre_process
-
-        # Setup region helper to get search URL
-        region_helper = RegionTool(
-            content_type=self.content_type, query=query, region=self.region_override)
-
-        search_url = region_helper.get_api_search_url(
-        ) if self.content_type == 'books' else region_helper.get_search_url()
-        self.log_search_url(search_url)
-        return search_url
-
     def check_for_asin(self):
         """
-            Checks filename (for books) and/or search query for ASIN to quick match.
+            Checks filename (for books) and/or search query for a
+            quick-match ID: a native book./person. ID or a legacy ASIN.
+
+            This is the sole appender of quick-match results: it appends
+            the result(s) itself and returns True when the caller must
+            stop the normal search, False to continue.
         """
         # Check filename for ASIN if content type is books
         if self.media.filename and self.content_type == 'books':
             try:
                 # Provide a plain filename for ASIN search
-                filename_unquoted = urllib.unquote(
-                    self.media.filename).decode('utf8')
-                filename_search_asin = self.search_asin(filename_unquoted)
+                filename_unquoted = _urlparse.unquote(self.media.filename)
+                filename_unquoted = self.search_asin(filename_unquoted)
             except Exception as e:
                 log.error('Error checking filename for ASIN: %s', e)
+                filename_unquoted = None
 
-            if filename_search_asin:
+            if filename_unquoted:
                 log.info('ASIN found in filename')
-                self.check_for_region(filename_unquoted)
-                return filename_search_asin.group(0) + '_' + self.region_override
+                return self.append_quick_match_book(
+                    filename_unquoted.group(0))
 
-        # Check search query for ASIN
+        # Check search query for an ID
         # Default to album and use artist if no album
-        manual_asin = self.media.album if self.media.album else self.media.artist
-        manual_search_asin = self.search_asin(manual_asin)
+        manual_input = self.media.album if self.media.album \
+            else self.media.artist
+        if not manual_input:
+            return False
 
-        if manual_search_asin:
+        # Native-ID manual matching first
+        parsed = metadata_ids.parse_metadata_id(
+            manual_input, self.content_type)
+        if parsed[0] == 'book':
+            return self.append_quick_match_book_id(
+                parsed[1], parsed[2])
+        if parsed[0] == 'person':
+            return self.append_quick_match_person_id(parsed[1])
+
+        # Legacy ASIN quick match
+        match = self.search_asin(manual_input)
+        if match:
+            asin = match.group(0)
             log.info('ASIN found in manual search')
-            self.check_for_region(manual_asin)
-            return manual_search_asin.group(0) + '_' + self.region_override
+            if self.content_type == 'books':
+                return self.append_quick_match_book(asin)
+            # Automatic person search must not guess.
+            if not self.manual:
+                return False
+            return self.append_quick_match_person(asin)
 
-    # Check for region override
-    def check_for_region(self, search_title):
+        return False
+
+    # Quick-match appenders (score 100; return True when appended)
+    def append_quick_match_book(self, asin):
         """
-            Overrides the search with a region.
+            Resolves a legacy book ASIN and appends a score-100 result.
         """
-        match_region = self.search_region(search_title)
-        if match_region:
-            log.info('Region found in title')
-            self.region_override = match_region.group(0)
-        else:
-            self.region_override = self.prefs['region']
-        log.info('Region Override: %s', self.region_override)
+        book, matched_release_id = api_client.resolve_asin_book(asin)
+        if book is None:
+            log.info('ASIN %s not in AudiobookDB catalog' % asin)
+            return False
+        self.results.Append(
+            MetadataSearchResult(
+                id=metadata_ids.serialize_book_id(
+                    book['id'], matched_release_id),
+                lang=self.lang,
+                name=book.get('title'),
+                score=100,
+                year=book.get('copyright'),
+            )
+        )
+        return True
+
+    def append_quick_match_book_id(self, book_id, release_id):
+        """
+            Validates a native book ID against the detail endpoints and
+            appends a score-100 result.
+        """
+        book = api_client.get_book(book_id)
+        if book is None:
+            log.info('Book %s not found' % book_id)
+            return False
+        if release_id:
+            release = api_client.get_release(release_id)
+            if release is None:
+                log.info('Release %s not found' % release_id)
+                return False
+            release_book_id = (release.get('book') or {}).get('id')
+            if release_book_id and release_book_id != book.get('id'):
+                log.info('Release %s does not belong to book %s' % (
+                    release_id, book_id))
+                return False
+        self.results.Append(
+            MetadataSearchResult(
+                id=metadata_ids.serialize_book_id(book['id'], release_id),
+                lang=self.lang,
+                name=book.get('title'),
+                score=100,
+                year=book.get('copyright'),
+            )
+        )
+        return True
+
+    def append_quick_match_person(self, asin):
+        """
+            Resolves a legacy artist ASIN and appends score-100 result(s).
+            Ambiguous matches only append in manual searches.
+        """
+        hits = api_client.resolve_asin_person(asin)
+        if len(hits) == 0:
+            log.info('ASIN %s not in AudiobookDB catalog' % asin)
+            return False
+        if len(hits) > 1:
+            if not self.manual:
+                log.info('ASIN %s is ambiguous (%d people)' % (
+                    asin, len(hits)))
+                return False
+            appended = False
+            for hit in hits:
+                if self._append_person_detail(hit['id'], asin):
+                    appended = True
+            return appended
+        return self._append_person_detail(hits[0]['id'], asin)
+
+    def _append_person_detail(self, person_id, asin=None):
+        """
+            Fetches a person detail, optionally confirming the Audible
+            external ASIN, and appends a score-100 result.
+        """
+        person = api_client.get_person(person_id)
+        if person is None:
+            log.info('Person %s not found' % person_id)
+            return False
+        if asin:
+            confirmed = False
+            for ext in person.get('external') or []:
+                if ext.get('itemId') == asin and (
+                        ext.get('category') or {}).get('title') == 'Audible':
+                    confirmed = True
+                    break
+            if not confirmed:
+                log.info('Person %s does not confirm ASIN %s' % (
+                    person_id, asin))
+                return False
+        self.results.Append(
+            MetadataSearchResult(
+                id=metadata_ids.serialize_person_id(person['id']),
+                lang=self.lang,
+                name=person.get('name'),
+                score=100,
+                year=None,
+            )
+        )
+        return True
+
+    def append_quick_match_person_id(self, person_id):
+        """
+            Validates a native person ID against the detail endpoint and
+            appends a score-100 result.
+        """
+        person = api_client.get_person(person_id)
+        if person is None:
+            log.info('Person %s not found' % person_id)
+            return False
+        self.results.Append(
+            MetadataSearchResult(
+                id=metadata_ids.serialize_person_id(person['id']),
+                lang=self.lang,
+                name=person.get('name'),
+                score=100,
+                year=None,
+            )
+        )
+        return True
 
     def clear_contributor_text(self, string):
         contributor_regex = '.+?(?= -)'
@@ -87,75 +209,12 @@ class SearchTool:
             return re.match(contributor_regex, string).group(0)
         return string
 
-    def log_search_url(self, search_url):
-        """
-            Logs the search URL.
-        """
-        log.debug('Search URL: %s', search_url)
-
-    def override_with_asin(self, match_asin, region=None):
-        """
-            Overrides the search with an ASIN.
-        """
-        log.debug('Overriding' + ' ' + self.content_type +
-                  ' ' + 'search with ASIN')
-        asin = match_asin.group(0)
-        # Param uses keyword for book and nothing for author
-        type_param = '&keywords=' if self.content_type == 'books' else ''
-        # Wrap the param for url use
-        url_param = type_param + urllib.quote(asin)
-
-        # Setup region helper to get search URL
-        self.region_override = region if region else self.prefs['region']
-        region_helper = RegionTool(
-            content_type=self.content_type, query=url_param, region=self.region_override)
-
-        # Books use api search authors use audnexus search
-        if self.content_type == 'books':
-            search_url = region_helper.get_api_search_url()
-        else:
-            # Set ID to ASIN
-            region_helper.id = asin
-            search_url = region_helper.get_id_url()
-
-        self.log_search_url(search_url)
-        return search_url
-
-    def pre_process_title(self):
-        """
-            Pre-processes the title to remove any contributor text.
-        """
-        log.debug('Pre-processing title')
-        # Setup some basic things
-        search_title = self.media.album if self.content_type == 'books' else self.media.artist
-        asin_search_title = self.media.artist
-
-        # Region override
-        self.check_for_region(search_title)
-
-        # Normalize name
-        if self.content_type == 'books':
-            asin_search_title = self.normalizedName
-
-        # ASIN override
-        match_asin = self.search_asin(asin_search_title)
-        if match_asin:
-            log.debug('ASIN found in title')
-            return self.override_with_asin(match_asin, self.region_override)
-
     def search_asin(self, input):
         """
             Searches for ASIN in a string.
         """
         if input:
             return re.search(asin_regex, input)
-
-    def search_region(self, input):
-        """
-            Searches for region in a string.
-        """
-        if input:
-            return re.search(region_regex, input)
 
     def validate_author_name(self):
         """
@@ -180,35 +239,26 @@ class SearchTool:
 
 
 class AlbumSearchTool(SearchTool):
-    def build_search_args(self):
+    def build_search_body(self):
         """
-            Builds the search arguments for the API call.
+            Builds the search body for the API call.
+            Returns None when there is nothing to search for.
         """
         # First, normalize the name
         self.normalize_name()
-        # Album title query
-        album_param = 'title=' + urllib.quote(self.normalizedName)
 
+        body = {'type': 'books'}
+        filters = {}
         # Fix match/manual search doesn't provide author
         if self.media.artist:
-            artist_param = '&author=' + urllib.quote(self.media.artist)
-        else:
-            # Use keyword search to supplement missing author
-            album_param = 'keywords=' + urllib.quote(self.normalizedName)
-            artist_param = ''
-        # Combine params
-        query = (album_param + artist_param)
-        return query
-
-    def check_if_preorder(self, book_date):
-        """
-            Checks if the book is a preorder.
-            If so, it is excluded from the search.
-        """
-        current_date = (date.today())
-        if book_date > current_date:
-            log.info("Excluding pre-order book")
-            return True
+            filters['person'] = self.media.artist
+        if self.normalizedName and len(self.normalizedName) >= 3:
+            body['q'] = self.normalizedName
+        if filters:
+            body['filters'] = filters
+        if 'q' not in body and not filters:
+            return None
+        return body
 
     def name_to_initials(self, input_name):
         """
@@ -254,6 +304,10 @@ class AlbumSearchTool(SearchTool):
         input_name = self.media.album if self.media.album else self.media.title
         log.debug('Input Name: %s', input_name)
 
+        if not input_name:
+            self.normalizedName = ''
+            return self.normalizedName
+
         # Remove Diacritics
         name = String.StripDiacritics(input_name)
         # Remove brackets and text inside
@@ -279,25 +333,30 @@ class AlbumSearchTool(SearchTool):
             for Plex search results.
         """
         search_results = []
-        for item in api_response['products']:
+        for item in api_response:
             # Only append results which have valid keys
-            if item.viewkeys() >= {
-                "asin",
-                "authors",
-                "language",
-                "narrators",
-                "release_date",
-                "title"
-            }:
+            if isinstance(item, dict) and \
+                    set(item.keys()) >= {'id', 'title', 'people'}:
+                authors = [
+                    {'name': p['person']['name']}
+                    for p in item.get('people') or []
+                    if (p.get('role') or {}).get('name') == 'Author'
+                ]
+                narrator = []
+                for p in item.get('people') or []:
+                    if (p.get('role') or {}).get('name') == 'Narrator':
+                        narrator = [{'name': p['person']['name']}]
+                        break
                 search_results.append(
                     {
-                        'asin': item['asin'] + '_' + self.region_override,
-                        'author': item['authors'],
-                        'date': item['release_date'],
-                        'language': item['language'],
-                        'narrator': item['narrators'],
-                        'region': self.region_override,
+                        'book_id': metadata_ids.serialize_book_id(
+                            item['id']),
+                        'author': authors,
+                        'date': None,
+                        'language': item.get('originalLanguage'),
+                        'narrator': narrator,
                         'title': item['title'],
+                        'subtitle': item.get('subtitle'),
                     }
                 )
         return search_results
@@ -346,14 +405,16 @@ class AlbumSearchTool(SearchTool):
 
 
 class ArtistSearchTool(SearchTool):
-    def build_search_args(self):
+    def build_search_body(self):
         """
-            Builds the search query for the API.
+            Builds the search body for the API call.
+            Returns None when there is nothing to search for.
         """
         modified_artist_name = self.cleanup_author_name(self.media.artist)
-        query = 'name=' + urllib.quote(modified_artist_name)
-        # Set param
-        return query
+        if not modified_artist_name \
+                or len(modified_artist_name) < 3:
+            return None
+        return {'q': modified_artist_name, 'type': 'people'}
 
     def cleanup_author_name(self, name):
         """
@@ -459,14 +520,14 @@ class ArtistSearchTool(SearchTool):
         search_results = []
         for item in api_response:
             # Only append results which have valid keys
-            if item.viewkeys() >= {
-                "asin",
-                "name",
-            }:
+            if isinstance(item, dict) and \
+                    set(item.keys()) >= {'id', 'name'}:
                 search_results.append(
                     {
-                        'asin': item['asin'],
+                        'id': metadata_ids.serialize_person_id(item['id']),
                         'name': item['name'],
+                        'description': item.get('description'),
+                        'genres': item.get('genres'),
                     }
                 )
         return search_results
@@ -522,13 +583,12 @@ class ScoreTool:
         """
             Scores an author result.
         """
-        self.asin = self.result_dict['asin']
+        self.asin = self.result_dict['id']
         self.author = self.result_dict['name']
         self.authors_concat = self.author
         self.date = None
         self.language = None
         self.narrator = None
-        self.region = None
         self.title = None
         return self.score_result()
 
@@ -536,15 +596,16 @@ class ScoreTool:
         """
             Scores a book result.
         """
-        self.asin = self.result_dict['asin']
+        self.asin = self.result_dict['book_id']
+        authors = self.result_dict['author']
         self.authors_concat = ', '.join(
-            author['name'] for author in self.result_dict['author']
-        )
-        self.author = self.result_dict['author'][0]['name']
+            author['name'] for author in authors
+        ) if authors else ''
+        self.author = authors[0]['name'] if authors else ''
         self.date = self.result_dict['date']
-        self.language = self.result_dict['language'].title()
-        self.narrator = self.result_dict['narrator'][0]['name']
-        self.region = self.result_dict['region']
+        self.language = self.result_dict['language']
+        narrators = self.result_dict['narrator']
+        self.narrator = narrators[0]['name'] if narrators else ''
         self.title = self.result_dict['title']
         return self.score_result()
 
@@ -568,7 +629,7 @@ class ScoreTool:
         # Go through all the keys for the result and log as we go
         if self.asin:
             plex_score_dict['id'] = self.asin
-            data_to_log.append({'ASIN is': self.asin})
+            data_to_log.append({'ID is': self.asin})
         if self.author:
             plex_score_dict['author'] = self.author
             data_to_log.append({'Author is': self.author})
@@ -578,9 +639,6 @@ class ScoreTool:
         if self.narrator:
             plex_score_dict['narrator'] = self.narrator
             data_to_log.append({'Narrator is': self.narrator})
-        if self.region:
-            plex_score_dict['region'] = self.region
-            data_to_log.append({'Region is': self.region})
         if score:
             plex_score_dict['score'] = score
             data_to_log.append({'Score is': str(score)})
@@ -617,7 +675,7 @@ class ScoreTool:
                 all_scores.append(lang_score)
 
         # Subtract difference from initial score
-        # Subtract index to use Audible relevance as weight
+        # Subtract index to use relevance as weight
         score = self.INITIAL_SCORE - self.sum_scores(all_scores) - self.index
 
         log.info("Result #" + str(self.index + 1))
