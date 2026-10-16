@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import plex_shim  # noqa: F401,E402  (framework fakes must load first)
 
-from plex_shim import Prefs, _HTTPRequest  # noqa: E402
+from plex_shim import HTTP, Prefs, _HTTPRequest  # noqa: E402
 
 import api_client  # noqa: E402
 from update_tools import (  # noqa: E402
@@ -141,13 +141,20 @@ class TestAlbumResolveLegacyAsin(unittest.TestCase):
 
     def test_404_leaves_untouched(self):
         install_transport({})
-        meta = FakeMetadata('B0AAAAAAAAA_us')
+        meta = FakeMetadata('B0AAAAAAAA_us')
         before = (meta.title, meta.summary, meta.studio, meta.id)
-        tool = make_album('B0AAAAAAAAA_us', metadata=meta)
+        tool = make_album('B0AAAAAAAA_us', metadata=meta)
         self.assertFalse(tool.resolve_item())
         self.assertEqual((meta.title, meta.summary, meta.studio, meta.id),
                          before)
         self.assertEqual(tool.native_book_id, None)
+        # A valid ten-character ASIN: the resolve endpoint was actually
+        # hit (an 11-char value would be rejected before any request).
+        # The 404 is retried within the attempt budget.
+        self.assertEqual(
+            [req[0] for req in HTTP.requests],
+            [BASE + '/audiobooks/external/audible/B0AAAAAAAA'] *
+            api_client.MAX_ATTEMPTS)
         self.assertEqual(tool.native_release_id, None)
 
 
@@ -158,6 +165,9 @@ class TestAlbumResolveNative(unittest.TestCase):
                 200, api_body(load_fixture(BOOK_DETAIL))),
             BASE + '/releases/dPL9fC7YnK8X': (
                 200, api_body(load_fixture(RELEASE_DETAIL))),
+            BASE + '/releases/RAffFyqchypK': (
+                200, api_body(
+                    load_fixture('release_detail_RAffFyqchypK.json'))),
             BASE + '/items/book/WQQDcMBQ3qUT/ratings': (
                 200, api_body(load_fixture('ratings_book_WQQDcMBQ3qUT.json'))),
         }
@@ -177,6 +187,18 @@ class TestAlbumResolveNative(unittest.TestCase):
         tool = make_album('book.WQQDcMBQ3qUT')
         self.assertTrue(tool.resolve_item())
         self.assertEqual(tool.native_release_id, 'RAffFyqchypK')
+
+    def test_selected_release_404_work_only(self):
+        # The selected (lowest, 'RAffFyqchypK') release detail 404s: fall
+        # back to the work-only path rather than pinning a composite ID
+        # that would fail closed on the next update.
+        transport = dict(self._transport())
+        del transport[BASE + '/releases/RAffFyqchypK']
+        install_transport(transport)
+        tool = make_album('book.WQQDcMBQ3qUT')
+        self.assertTrue(tool.resolve_item())
+        self.assertEqual(tool.native_book_id, 'WQQDcMBQ3qUT')
+        self.assertIsNone(tool.native_release_id)
 
     def test_pinned_release_404_preserved(self):
         install_transport(self._transport())
@@ -570,6 +592,17 @@ class TestTagTool(unittest.TestCase):
         tool.set_empty_variables()
         tool.metadata.styles.add('Old Style')
         tool.narrator = [{'name': 'R.C. Bray'}]
+        tagger = TagTool(tool, Prefs)
+        tagger.add_narrators_to_styles()
+        self.assertEqual(tool.metadata.styles, {'Old Style'})
+
+    def test_add_narrators_empty_keeps_styles(self):
+        # Forced work-only update (no release -> no narrators): existing
+        # styles must survive the refresh.
+        tool = self._album_tool(force=True)
+        tool.set_empty_variables()
+        tool.metadata.styles.add('Old Style')
+        tool.narrator = []
         tagger = TagTool(tool, Prefs)
         tagger.add_narrators_to_styles()
         self.assertEqual(tool.metadata.styles, {'Old Style'})

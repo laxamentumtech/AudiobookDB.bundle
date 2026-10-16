@@ -238,6 +238,44 @@ class TestRetryAfter(unittest.TestCase):
         self.assertIsNone(api_client.make_request(BASE + '/x'))
         self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
 
+    def test_429_oversized_retry_after_clamped(self):
+        Prefs['logging_level'] = 'ERROR'
+        sleeps = []
+        real_sleep = api_client.sleep
+
+        def transport(url, method='GET', headers=None, data=None):
+            return _HTTPRequest(429, '', {'retry-after': '99999'})
+        HTTP.Reset()
+        HTTP.Headers = {'X-API-Key': 'anonymous'}
+        HTTP.transport = transport
+        api_client.sleep = sleeps.append
+        try:
+            self.assertIsNone(api_client.make_request(BASE + '/x'))
+        finally:
+            api_client.sleep = real_sleep
+        # Every 429 attempt (all of them) sleeps the clamped bound,
+        # never 99999.
+        self.assertEqual(sleeps, [api_client.MAX_RETRY_AFTER] *
+                         api_client.MAX_ATTEMPTS)
+
+    def test_429_negative_retry_after_falls_back(self):
+        Prefs['logging_level'] = 'ERROR'
+        sleeps = []
+        real_sleep = api_client.sleep
+
+        def transport(url, method='GET', headers=None, data=None):
+            return _HTTPRequest(429, '', {'retry-after': '-5'})
+        HTTP.Reset()
+        HTTP.Headers = {'X-API-Key': 'anonymous'}
+        HTTP.transport = transport
+        api_client.sleep = sleeps.append
+        try:
+            self.assertIsNone(api_client.make_request(BASE + '/x'))
+        finally:
+            api_client.sleep = real_sleep
+        # A negative value must not raise; it falls back to the default.
+        self.assertEqual(sleeps, [0] * api_client.MAX_ATTEMPTS)
+
 
 if __name__ == '__main__':
     unittest.main()

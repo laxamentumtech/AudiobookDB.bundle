@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(byte-compile only). 199 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 203 tests, 0 network.
 
 ## Contents/Code modules → test files
 
@@ -24,7 +24,7 @@ Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
 | `TestAlbumUpdate` | 5 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed |
 | `TestArtistSearchAndUpdate` | 3 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched |
 
-## `test_api_client.py` (24 tests)
+## `test_api_client.py` (26 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -34,7 +34,7 @@ Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
 | `TestResolveAsinBook` | 2 | `resolve_asin_book`: single hit → book ID; 404 → `None` |
 | `TestResolveAsinPerson` | 2 | `resolve_asin_person`: single hit → person ID; empty/ambiguous → `None` |
 | `TestDetailAndGetters` | 8 | `get_book` (+ `include=chapters`), `get_release`, `get_person`, `get_ratings`, `search` (book/people fixtures, short-q → `None`) |
-| `TestRetryAfter` | 2 | 429 + `Retry-After` retry then success; exhausted → `None` |
+| `TestRetryAfter` | 4 | 429 + `Retry-After` retry then success; exhausted → `None`; oversized value clamped to `MAX_RETRY_AFTER`; negative value falls back to default |
 
 ## `test_logging.py` (16 tests)
 
@@ -73,19 +73,19 @@ Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
 | `TestArtistParseApiResponse` | 2 | artist `parse_api_response`: fixture, missing keys rejected |
 | `TestScoreTool` | 11 | `reduce_string`, `sum_scores`, `run_score_author`, `run_score_book` (perfect, empty people, ignore-boundary skip, index penalty, language deduction), `score_album`/`score_author` no-match → 0, `score_language` mismatch |
 
-## `test_update_tools.py` (51 tests)
+## `test_update_tools.py` (53 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestAlbumResolveLegacyAsin` | 2 | album `resolve_item`: legacy migration (populates, stashes native IDs), 404 untouched |
-| `TestAlbumResolveNative` | 5 | album `resolve_item`: book+release pinned, book-only lowest-ID select, pinned 404 preserved, book 404 preserved, wrong-type invalid |
+| `TestAlbumResolveNative` | 6 | album `resolve_item`: book+release pinned, book-only lowest-ID select, selected-release 404 → work-only, pinned 404 preserved, book 404 preserved, wrong-type invalid |
 | `TestAlbumParseApiResponse` | 5 | album `parse_api_response`: series, no-releases work-only, audible chip rating (absent/non-first), missing cover → empty thumb |
 | `TestReleaseSelection` | 6 | `select_release`: pinned wins, matched > only > lowest, only release, lowest-ID default, matched-not-present falls through |
 | `TestArtistResolve` | 5 | artist `resolve_item`: legacy migration, native person, 404 untouched, ambiguous ASIN untouched, wrong-type invalid |
 | `TestUpdateToolHelpers` | 7 | `cleanup_html` (books/authors), `replace_html_special`, `collect_metadata_to_log`, `collect_metadata_arrs_to_log` (legacy typo), `getDateFromString`, `volume_prefix` |
 | `TestAlbumSetters` | 10 | `set_metadata_title` (+subtitle), `set_metadata_rating` (x2, none no-op), `set_metadata_date` guard, `set_metadata_studio`, `set_metadata_summary`, `set_metadata_sort_title` (+series), `set_metadata_tags` (+keep existing genres) |
 | `TestArtistSetters` | 7 | `set_metadata_title`, `set_metadata_description`, `set_metadata_sort_title` (last name/JR/single word), `set_metadata_tags`, `set_empty_variables` |
-| `TestTagTool` | 4 | `TagTool` force-clears narrators (styles preserved on work-only), non-force keeps existing, author/contributor handling, `similar=None` no-op |
+| `TestTagTool` | 5 | `TagTool` force-clears narrators (styles preserved when there are no narrators to re-add), non-force keeps existing, author/contributor handling, `similar=None` no-op |
 
 ## Legacy → new equivalence (per MIGRATION_PLAN.md)
 

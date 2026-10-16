@@ -306,10 +306,11 @@ class TestAlbumQuickMatch(unittest.TestCase):
         results = _Results()
         agent.AudiobookAlbum().search(
             results,
-            album_media(album='The Martian B0AAAAAAAAA'),
+            album_media(album='The Martian B0AAAAAAAA'),
             plex_shim.Locale.Language.English,
             True)
-        # B0AAAAAAAAA 404s; 'The Martian' (3+ chars) triggers a search,
+        # B0AAAAAAAA is a valid ten-character ASIN that 404s;
+        # 'The Martian' (3+ chars) triggers a search,
         # which 404s too -> no results.
         self.assertEqual(results.appended, [])
 
@@ -358,8 +359,8 @@ class TestAlbumUpdate(unittest.TestCase):
 
     def test_404_leaves_untouched(self):
         """Check 5: unresolvable legacy ASIN -> metadata untouched."""
-        metadata = self._run_update('B0AAAAAAAAA_us')
-        self.assertEqual(metadata.id, 'B0AAAAAAAAA_us')
+        metadata = self._run_update('B0AAAAAAAA_us')
+        self.assertEqual(metadata.id, 'B0AAAAAAAA_us')
         self.assertIsNone(metadata.title)
         self.assertIsNone(metadata.summary)
         self.assertIsNone(metadata.studio)
@@ -416,11 +417,11 @@ class TestArtistSearchAndUpdate(unittest.TestCase):
 
     def test_404_leaves_untouched(self):
         install_transport(None)
-        metadata = FakeMetadata('B0AAAAAAAAA')
+        metadata = FakeMetadata('B0AAAAAAAA')
         agent.AudiobookArtist().update(
             metadata, FakeMedia(title='Nobody'),
             plex_shim.Locale.Language.English, False)
-        self.assertEqual(metadata.id, 'B0AAAAAAAAA')
+        self.assertEqual(metadata.id, 'B0AAAAAAAA')
         self.assertIsNone(metadata.title)
         self.assertIsNone(metadata.summary)
 

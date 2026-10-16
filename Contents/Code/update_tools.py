@@ -241,6 +241,15 @@ class AlbumUpdateTool(UpdateTool):
                 release_id = self.select_release(book)
                 if release_id:
                     release = api_client.get_release(release_id)
+                    if release is None:
+                        # A selected (matched/only/lowest) release that
+                        # is unavailable: fall back to the work-only path
+                        # rather than pinning a composite ID that would
+                        # fail closed on the next update.
+                        log.info(
+                            'Release %s not found; updating work-level '
+                            'metadata only.' % release_id)
+                        release_id = None
             if book is None:
                 return False
 
@@ -616,6 +625,10 @@ class TagTool:
         """
             Adds narrators to styles.
         """
+        # No narrators (e.g. a forced work-only update): keep whatever
+        # styles already exist instead of clearing them.
+        if not self.helper.narrator:
+            return
         if not self.helper.metadata.styles or self.helper.force:
             self.helper.metadata.styles.clear()
             for narrator in self.helper.narrator:

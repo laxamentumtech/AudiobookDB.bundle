@@ -54,10 +54,9 @@ the display name. Pinned by
 
 ## 7. Unguarded `r['year']` in search results — **RESOLVED**
 
-Both search parse paths guard the year: album `parse_api_response` uses
-`item.get('year', 0)` and artist `parse_api_response` uses
-`self.result_dict.get('year', 0)` (`search_tools.py`). Person search hits
-carry no year at all.
+The legacy album search passed `year=r['year']` (KeyError on hits without a
+year). The new album parse path uses `book.get('copyright')` and the artist
+parse path passes no year at all, so no year access can raise.
 
 ## 8. Rating is doubled (`float(rating) * 2`) — **KEPT (audible chip only)**
 

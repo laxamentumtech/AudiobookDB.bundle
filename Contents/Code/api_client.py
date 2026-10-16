@@ -13,6 +13,8 @@ USER_AGENT = 'AudiobookDB.bundle/' + version + \
 # Max total attempts for any call (including the first).
 MAX_ATTEMPTS = 4
 DEFAULT_RETRY_AFTER = 1
+# Server-supplied Retry-After values are clamped to this upper bound.
+MAX_RETRY_AFTER = 60
 
 
 def _decode(body):
@@ -73,6 +75,12 @@ def _request_with_retries(url, method=None, headers=None, data=None):
                         retry_after = int(headers_map[key])
                     except (ValueError, TypeError):
                         retry_after = DEFAULT_RETRY_AFTER
+                    # Clamp: a hostile/buggy value must not abort the
+                    # request (negative) or block the UI (oversized).
+                    if retry_after < 0:
+                        retry_after = DEFAULT_RETRY_AFTER
+                    if retry_after > MAX_RETRY_AFTER:
+                        retry_after = MAX_RETRY_AFTER
             log.warn('API rate limited, retrying in %d seconds: %s' % (
                 retry_after, url))
             sleep(retry_after)
