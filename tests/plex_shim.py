@@ -121,30 +121,40 @@ class _HTTPRequest(object):
     def __init__(self, status=200, body=None, headers=None):
         self.status = status
         self.body = body
+        if isinstance(self.body, bytes):
+            self.body = self.body.decode('utf-8')
         self.headers = headers or {}
+
+    def __str__(self):
+        return self.body or ''
 
 
 class _HTTPModule(object):
-    """Fake ``HTTP`` module: a settable transport + a dict-based cache."""
+    """Fake ``HTTP`` module: a settable transport + a dict-based cache.
+
+    ``transport(url, method='GET', headers=None, data=None)`` must return an
+    ``_HTTPRequest``. Requests are Plex-style: GETs are cached by URL;
+    ``str(response)`` yields the body (legacy contract); ``.status`` and
+    ``.headers`` are available for api_client retries.
+    """
 
     def __init__(self):
-        self.transport = lambda url, method='GET': _HTTPRequest(200, '')
+        self.transport = lambda url, method='GET', **kw: _HTTPRequest(200, '')
         self.Headers = {}
         self.CacheTime = 0
         self._cache = {}
-        self.requests = []  # (url, method) call log
+        self.requests = []  # (url, method, headers, data) call log
 
-    def Request(self, url, timeout=None, sleep=None):
-        self.requests.append((url, 'GET'))
-        if url in self._cache:
+    def Request(self, url, method='GET', headers=None, data=None,
+                timeout=None, sleep=None):
+        self.requests.append((url, method, headers, data))
+        cacheable = method == 'GET'
+        if cacheable and url in self._cache:
             return self._cache[url]
-        resp = self.transport(url)
-        body = resp.body
-        if isinstance(body, bytes):
-            body = body.decode('utf-8')
-        if url not in self._cache:
-            self._cache[url] = body
-        return body
+        resp = self.transport(url, method=method, headers=headers, data=data)
+        if cacheable:
+            self._cache[url] = resp
+        return resp
 
     def ClearCache(self):
         self._cache = {}

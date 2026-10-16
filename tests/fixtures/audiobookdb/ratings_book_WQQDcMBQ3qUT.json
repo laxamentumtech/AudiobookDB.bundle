@@ -1,0 +1,20 @@
+{
+  "chips": [
+    {
+      "source": "openlibrary",
+      "label": "Open Library",
+      "average": 4.3,
+      "formatted": "4.30/5 · 1234 ratings",
+      "count": 1234,
+      "sourceUrl": "https://openlibrary.org/works/OL9273178W"
+    },
+    {
+      "source": "audible",
+      "label": "Audible (The Martian)",
+      "average": 4.8,
+      "formatted": "4.80/5 · 45478 ratings",
+      "count": 45478,
+      "sourceUrl": "https://www.audible.com/pd/B00B5HZGUG"
+    }
+  ]
+}

@@ -85,7 +85,7 @@ def install_transport(mapping, default=''):
     Bodies are ASCII-escaped JSON so decoded strings are ``str`` under
     Python 2 (matching what the legacy bundle saw from real APIs).
     """
-    def transport(url, method='GET'):
+    def transport(url, method='GET', headers=None, data=None):
         if url in mapping:
             status, body = mapping[url]
         else:
@@ -120,7 +120,8 @@ class TestModuleHelpers(unittest.TestCase):
 
     def test_make_request_success(self):
         install_transport({'http://example.com/x': (200, 'body-bytes')})
-        self.assertEqual(agent.make_request('http://example.com/x'),
+        # make_request returns str(HTTP.Request(...)): the response body.
+        self.assertEqual(str(agent.make_request('http://example.com/x')),
                          'body-bytes')
 
     def test_make_request_failure_raises_type_error(self):
@@ -353,7 +354,7 @@ class TestAlbumUpdate(unittest.TestCase):
         # transport default 404 body is stored.
         metadata = self._run('B00B5HZGUG_us')
         fixture = load_fixture('book_detail.json')
-        self.assertEqual(metadata.posters[fixture['image']], ('', 0))
+        self.assertEqual(str(metadata.posters[fixture['image']][0]), '')
 
     def test_poster_not_refetched_without_force(self):
         fixture = load_fixture('book_detail.json')
@@ -367,11 +368,12 @@ class TestAlbumUpdate(unittest.TestCase):
             agent.AudiobookAlbum().update(
                 metadata, FakeMedia(title='The Martian'),
                 plex_shim.Locale.Language.English, False)
-        poster_requests = [u for u, _ in HTTP.requests
-                           if u == fixture['image']]
+        poster_requests = [req[0] for req in HTTP.requests
+                           if req[0] == fixture['image']]
         self.assertEqual(len(poster_requests), 1)
-        self.assertEqual(metadata.posters[fixture['image']],
-                         ('JPEGDATA', 0))
+        self.assertEqual(
+            str(metadata.posters[fixture['image']][0]),
+            'JPEGDATA')
 
     def test_poster_refetched_on_force(self):
         fixture = load_fixture('book_detail.json')
@@ -387,13 +389,14 @@ class TestAlbumUpdate(unittest.TestCase):
         agent.AudiobookAlbum().update(
             metadata, FakeMedia(title='The Martian'),
             plex_shim.Locale.Language.English, True)
-        poster_requests = [u for u, _ in HTTP.requests
-                           if u == fixture['image']]
+        poster_requests = [req[0] for req in HTTP.requests
+                           if req[0] == fixture['image']]
         self.assertEqual(len(poster_requests), 2)
 
     def test_update_only_requests_detail(self):
         self._run('B00B5HZGUG_us')
-        detail_requests = [u for u, _ in HTTP.requests if 'audnex' in u]
+        detail_requests = [req[0] for req in HTTP.requests
+                           if 'audnex' in req[0]]
         self.assertEqual(detail_requests, [BOOK_DETAIL_URL])
 
 
