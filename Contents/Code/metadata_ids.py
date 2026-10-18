@@ -2,12 +2,12 @@ import re
 
 # Legacy ASIN grammar: exactly 10 base36 chars, optional '_xx' region suffix.
 # ASINs are uppercased on parse; the region suffix is discarded.
-_LEGACY_ASIN_RE = re.compile(r'\A([A-Za-z0-9]{10})(?:_([A-Za-z]{2}))?\Z')
+LEGACY_ASIN_RE = re.compile(r'\A([A-Za-z0-9]{10})(?:_([A-Za-z]{2}))?\Z')
 
 # Native grammar tokens.
-_BOOK_PREFIX = 'book.'
-_RELEASE_SEGMENT = '.release.'
-_PERSON_PREFIX = 'person.'
+BOOK_PREFIX = 'book.'
+RELEASE_SEGMENT = '.release.'
+PERSON_PREFIX = 'person.'
 
 
 def parse_metadata_id(raw, content_type):
@@ -28,28 +28,28 @@ def parse_metadata_id(raw, content_type):
     if not raw:
         return ('invalid', None, None)
 
-    if raw.startswith(_BOOK_PREFIX):
+    if raw.startswith(BOOK_PREFIX):
         if content_type != 'books':
             return ('invalid', None, None)
-        rest = raw[len(_BOOK_PREFIX):]
+        rest = raw[len(BOOK_PREFIX):]
         if not rest:
             return ('invalid', None, None)
-        if _RELEASE_SEGMENT in rest:
-            book_id, release_id = rest.split(_RELEASE_SEGMENT, 1)
+        if RELEASE_SEGMENT in rest:
+            book_id, release_id = rest.split(RELEASE_SEGMENT, 1)
             if not book_id or not release_id:
                 return ('invalid', None, None)
             return ('book', book_id, release_id)
         return ('book', rest, None)
 
-    if raw.startswith(_PERSON_PREFIX):
+    if raw.startswith(PERSON_PREFIX):
         if content_type != 'authors':
             return ('invalid', None, None)
-        person_id = raw[len(_PERSON_PREFIX):]
+        person_id = raw[len(PERSON_PREFIX):]
         if not person_id:
             return ('invalid', None, None)
         return ('person', person_id, None)
 
-    match = _LEGACY_ASIN_RE.match(raw)
+    match = LEGACY_ASIN_RE.match(raw)
     if match:
         asin = match.group(1).upper()
         return ('legacy', asin, None)
@@ -64,8 +64,8 @@ def serialize_book_id(book_id, release_id=None):
     if not book_id:
         return None
     if release_id:
-        return _BOOK_PREFIX + book_id + _RELEASE_SEGMENT + release_id
-    return _BOOK_PREFIX + book_id
+        return BOOK_PREFIX + book_id + RELEASE_SEGMENT + release_id
+    return BOOK_PREFIX + book_id
 
 
 def serialize_person_id(person_id):
@@ -74,4 +74,4 @@ def serialize_person_id(person_id):
     """
     if not person_id:
         return None
-    return _PERSON_PREFIX + person_id
+    return PERSON_PREFIX + person_id

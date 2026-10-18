@@ -4,6 +4,13 @@ from time import sleep
 from logging import Logging
 from _version import version
 
+# The Plex sandbox does not expose the ``bytes`` name and on Python 2
+# ``str`` is bytes; resolve the type at import time.
+try:
+    BYTES_TYPE = bytes
+except NameError:  # pragma: no cover - python 2 sandbox
+    BYTES_TYPE = str
+
 log = Logging()
 
 BASE_URL = 'https://audiobookdb.org/api'
@@ -17,14 +24,14 @@ DEFAULT_RETRY_AFTER = 1
 MAX_RETRY_AFTER = 60
 
 
-def _decode(body):
+def decode(body):
     """
         Decodes a JSON body, returning None for malformed JSON and for
         JSON:API error envelopes ({"errors": [...]}).
     """
     if body is None:
         return None
-    if isinstance(body, bytes):
+    if isinstance(body, BYTES_TYPE):
         body = body.decode('utf-8')
     if not body:
         return None
@@ -37,7 +44,7 @@ def _decode(body):
     return data
 
 
-def _request_with_retries(url, method=None, headers=None, data=None):
+def request_with_retries(url, method=None, headers=None, data=None):
     """
         Makes an HTTP call, retrying on failure.
 
@@ -62,12 +69,18 @@ def _request_with_retries(url, method=None, headers=None, data=None):
             sleep(DEFAULT_RETRY_AFTER)
             continue
 
-        status = getattr(response, 'status', 200)
+        try:
+            status = response.status
+        except AttributeError:
+            status = 200
         if 200 <= status < 300:
             return response
 
         if status == 429:
-            headers_map = getattr(response, 'headers', None) or {}
+            try:
+                headers_map = response.headers or {}
+            except AttributeError:
+                headers_map = {}
             retry_after = DEFAULT_RETRY_AFTER
             for key in ('retry-after', 'Retry-After', 'RETRY-AFTER'):
                 if key in headers_map:
@@ -97,10 +110,10 @@ def make_request(url):
         GETs a URL and returns the decoded JSON object, or None on any
         failure (non-2xx, malformed JSON, JSON:API error envelope).
     """
-    response = _request_with_retries(url)
+    response = request_with_retries(url)
     if response is None:
         return None
-    return _decode(str(response))
+    return decode(str(response))
 
 
 def fetch_bytes(url):
@@ -108,17 +121,17 @@ def fetch_bytes(url):
         GETs a URL and returns the raw response body (bytes), for images.
         Raises IOError once attempts are exhausted.
     """
-    response = _request_with_retries(url)
+    response = request_with_retries(url)
     if response is None:
         raise IOError('Failed to fetch: ' + url)
     # str() yields the raw body: py2 bytes (images) must stay bytes;
     # a py3 str body is re-encoded. Never UTF-8-encode image bytes.
     body = str(response)
     try:
-        _text = unicode
+        text_type = unicode
     except NameError:
-        _text = str
-    if isinstance(body, _text):
+        text_type = str
+    if isinstance(body, text_type):
         body = body.encode('utf-8')
     return body
 
@@ -132,23 +145,26 @@ def post_json(path, body):
     headers = {
         'Content-Type': 'application/json',
         'User-Agent': USER_AGENT,
-        'X-API-Key': _api_key(),
+        'X-API-Key': api_key(),
     }
-    response = _request_with_retries(
+    response = request_with_retries(
         url, method='POST', headers=headers,
         data=json.dumps(body, ensure_ascii=True)
     )
     if response is None:
         return None
-    return _decode(str(response))
+    return decode(str(response))
 
 
-def _api_key():
+def api_key():
     """
         Reads the API key from the transport headers (Start() installs
         Prefs['api_key'] or 'anonymous' there).
     """
-    headers = getattr(HTTP, 'Headers', None) or {}
+    try:
+        headers = HTTP.Headers or {}
+    except AttributeError:
+        headers = {}
     return headers.get('X-API-Key', 'anonymous')
 
 

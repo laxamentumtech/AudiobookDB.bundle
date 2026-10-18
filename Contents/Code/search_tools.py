@@ -10,9 +10,9 @@ log = Logging()
 
 # Py2/py3 urllib compat (filename unquoting)
 try:
-    import urllib.parse as _urlparse
+    import urllib.parse as url_parse
 except ImportError:  # pragma: no cover - python 2
-    import urllib as _urlparse
+    import urllib as url_parse
 
 asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
 
@@ -39,7 +39,7 @@ class SearchTool:
         if self.media.filename and self.content_type == 'books':
             try:
                 # Provide a plain filename for ASIN search
-                filename_unquoted = _urlparse.unquote(self.media.filename)
+                filename_unquoted = url_parse.unquote(self.media.filename)
                 filename_unquoted = self.search_asin(filename_unquoted)
             except Exception as e:
                 log.error('Error checking filename for ASIN: %s', e)
@@ -147,12 +147,12 @@ class SearchTool:
                 return False
             appended = False
             for hit in hits:
-                if self._append_person_detail(hit['id'], asin):
+                if self.append_person_detail(hit['id'], asin):
                     appended = True
             return appended
-        return self._append_person_detail(hits[0]['id'], asin)
+        return self.append_person_detail(hits[0]['id'], asin)
 
-    def _append_person_detail(self, person_id, asin=None):
+    def append_person_detail(self, person_id, asin=None):
         """
             Fetches a person detail, optionally confirming the Audible
             external ASIN, and appends a score-100 result.

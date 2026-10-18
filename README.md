@@ -4,10 +4,12 @@ A [Plex](https://www.plex.tv) metadata agent for audiobooks that sources its
 metadata from the [AudiobookDB](https://audiobookdb.org) public API
 (`<https://audiobookdb.org/api>`).
 
-It is the successor to the Audnexus agent: same agent identity in Plex
-(`com.plexapp.agents.audnexus`), so libraries already matched to the old agent
-keep working, but data is sourced from AudiobookDB (books, releases, people)
-instead of Audible/Audnexus.
+It is the successor to the Audnexus agent and installs alongside it: it
+registers under its own plug-in identifier (`com.plexapp.agents.audiobookdb`),
+so the legacy `Audnexus.bundle` can stay installed. Data is sourced from
+AudiobookDB (books, releases, people) instead of Audible/Audnexus; each library
+keeps using whichever agent is selected for it until you switch it over (see
+*Migrating from Audnexus*).
 
 ## Install
 
@@ -18,6 +20,16 @@ instead of Audible/Audnexus.
 - **From source:** clone this repository into your Plex `Plug-ins` directory
   (the `Contents/` folder must sit directly inside `AudiobookDB.bundle/`).
   Restart Plex.
+
+**Coming from Audnexus:** `AudiobookDB.bundle` declares its own plug-in
+identifier (`com.plexapp.agents.audiobookdb`), so it coexists with the legacy
+`Audnexus.bundle` — nothing needs to be removed. Existing libraries keep using
+Audnexus until you switch their agent in the library settings.
+
+**Plex Media Server 1.43+:** the legacy agent system is hidden during library
+setup unless *Show legacy agents during library setup* is enabled in the
+server's library settings. Plex has announced that the legacy agent system is
+being removed from new PMS releases in 2026; this bundle requires it.
 
 ## Configuration
 
@@ -45,11 +57,11 @@ search:
 
 ## Migrating from Audnexus
 
-Old pinned IDs (`ASIN` / `ASIN_region`) keep working: on the next refresh the
-agent resolves the ASIN against AudiobookDB, populates metadata, and rewrites
-the pinned ID to the new native form
-(`book.<id>.release.<id>` / `person.<id>`). If an ASIN is not in the
-AudiobookDB catalog, the item is left untouched and the failure is reported in
-the log — add the external link to AudiobookDB and retry.
+Once a library is switched to this agent, its old pinned IDs (`ASIN` /
+`ASIN_region`) keep working: on the next refresh the agent resolves the ASIN
+against AudiobookDB, populates metadata, and rewrites the pinned ID to the new
+native form (`book.<id>.release.<id>` / `person.<id>`). If an ASIN is not in
+the AudiobookDB catalog, the item is left untouched and the failure is reported
+in the log — add the external link to AudiobookDB and retry.
 
 Metadata by [AudiobookDB](https://audiobookdb.org)
