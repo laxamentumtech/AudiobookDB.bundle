@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import plex_shim  # noqa: F401,E402  (framework fakes must load first)
 
-from plex_shim import HTTP, Prefs, _HTTPRequest  # noqa: E402
+from plex_shim import HTTP, Log, Prefs, _HTTPRequest  # noqa: E402
 
 import api_client  # noqa: E402
 from update_tools import (  # noqa: E402
@@ -496,6 +496,75 @@ class TestAlbumSetters(unittest.TestCase):
         tool.set_metadata_summary()
         self.assertEqual(tool.metadata.summary, 'Desc')
 
+    def test_set_metadata_summary_forced_assigns(self):
+        tool = make_album(force=True)
+        tool.synopsis = '<p>Desc</p>'
+        tool.metadata.summary = 'Old summary'
+        tool.set_metadata_summary()
+        self.assertEqual(tool.metadata.summary, 'Desc')
+
+    def test_set_metadata_summary_non_forced_keeps_existing(self):
+        tool = make_album()
+        tool.synopsis = '<p>Desc</p>'
+        tool.metadata.summary = 'Old summary'
+        tool.set_metadata_summary()
+        self.assertEqual(tool.metadata.summary, 'Old summary')
+
+    def test_set_metadata_summary_forced_empty_preserves(self):
+        tool = make_album(force=True)
+        tool.synopsis = ''
+        tool.metadata.summary = 'Old summary'
+        tool.set_metadata_summary()
+        self.assertEqual(tool.metadata.summary, 'Old summary')
+
+    def test_set_metadata_summary_empty_preserves(self):
+        tool = make_album()
+        tool.synopsis = ''
+        tool.metadata.summary = 'Old summary'
+        tool.set_metadata_summary()
+        self.assertEqual(tool.metadata.summary, 'Old summary')
+
+    def test_set_metadata_summary_empty_both_stays_empty(self):
+        tool = make_album(force=True)
+        tool.synopsis = ''
+        tool.set_metadata_summary()
+        self.assertIsNone(tool.metadata.summary)
+
+    def test_set_metadata_summary_whitespace_and_markup_preserved(self):
+        for incoming in ('   ', '\n\t ', '<p></p>', '<br />'):
+            tool = make_album(force=True)
+            tool.synopsis = incoming
+            tool.metadata.summary = 'Old summary'
+            tool.set_metadata_summary()
+            self.assertEqual(tool.metadata.summary, 'Old summary',
+                             '%r erased the existing summary' % incoming)
+
+    def test_set_metadata_summary_unavailable_logged(self):
+        tool = make_album(force=True)
+        tool.synopsis = ''
+        tool.metadata.summary = 'Old summary'
+        Prefs['logging_level'] = 'INFO'
+        try:
+            Log.Clear()
+            tool.set_metadata_summary()
+            messages = [entry[1] for entry in Log.entries]
+            self.assertTrue(
+                [m for m in messages if 'keeping existing summary' in m],
+                messages)
+        finally:
+            Prefs['logging_level'] = 'ERROR'
+
+    def test_set_metadata_summary_empty_other_setters_unaffected(self):
+        tool = make_album(force=True)
+        tool.set_empty_variables()
+        tool.synopsis = ''
+        tool.title = 'The Martian'
+        tool.set_metadata_summary()
+        tool.set_metadata_title()
+        self.assertIsNone(tool.metadata.summary)
+        self.assertEqual(tool.metadata.title, 'The Martian')
+        self.assertEqual(tool.metadata.id, 'book.WQQDcMBQ3qUT')
+
     def test_set_metadata_sort_title_series(self):
         tool = make_album()
         tool.series = 'The Dune Sequence'
@@ -545,6 +614,75 @@ class TestArtistSetters(unittest.TestCase):
         tool.description = '<p>Bio</p>'
         tool.set_metadata_description()
         self.assertEqual(tool.metadata.summary, 'Bio')
+
+    def test_set_metadata_description_forced_assigns(self):
+        tool = make_artist(force=True)
+        tool.description = '<p>Bio</p>'
+        tool.metadata.summary = 'Old bio'
+        tool.set_metadata_description()
+        self.assertEqual(tool.metadata.summary, 'Bio')
+
+    def test_set_metadata_description_non_forced_keeps_existing(self):
+        tool = make_artist()
+        tool.description = '<p>Bio</p>'
+        tool.metadata.summary = 'Old bio'
+        tool.set_metadata_description()
+        self.assertEqual(tool.metadata.summary, 'Old bio')
+
+    def test_set_metadata_description_forced_empty_preserves(self):
+        tool = make_artist(force=True)
+        tool.description = ''
+        tool.metadata.summary = 'Old bio'
+        tool.set_metadata_description()
+        self.assertEqual(tool.metadata.summary, 'Old bio')
+
+    def test_set_metadata_description_empty_preserves(self):
+        tool = make_artist()
+        tool.description = ''
+        tool.metadata.summary = 'Old bio'
+        tool.set_metadata_description()
+        self.assertEqual(tool.metadata.summary, 'Old bio')
+
+    def test_set_metadata_description_empty_both_stays_empty(self):
+        tool = make_artist(force=True)
+        tool.description = ''
+        tool.set_metadata_description()
+        self.assertIsNone(tool.metadata.summary)
+
+    def test_set_metadata_description_whitespace_and_markup_preserved(self):
+        for incoming in ('   ', '\n\t ', '<p></p>', '<br />'):
+            tool = make_artist(force=True)
+            tool.description = incoming
+            tool.metadata.summary = 'Old bio'
+            tool.set_metadata_description()
+            self.assertEqual(tool.metadata.summary, 'Old bio',
+                             '%r erased the existing summary' % incoming)
+
+    def test_set_metadata_description_unavailable_logged(self):
+        tool = make_artist(force=True)
+        tool.description = ''
+        tool.metadata.summary = 'Old bio'
+        Prefs['logging_level'] = 'INFO'
+        try:
+            Log.Clear()
+            tool.set_metadata_description()
+            messages = [entry[1] for entry in Log.entries]
+            self.assertTrue(
+                [m for m in messages if 'keeping existing summary' in m],
+                messages)
+        finally:
+            Prefs['logging_level'] = 'ERROR'
+
+    def test_set_metadata_description_empty_other_setters_unaffected(self):
+        tool = make_artist(force=True)
+        tool.set_empty_variables()
+        tool.description = ''
+        tool.name = 'Andy Weir'
+        tool.set_metadata_description()
+        tool.set_metadata_title()
+        self.assertIsNone(tool.metadata.summary)
+        self.assertEqual(tool.metadata.title, 'Andy Weir')
+        self.assertEqual(tool.metadata.id, 'person.ypMPwXzWXaiX')
 
     def test_set_metadata_sort_title_last_name(self):
         tool = make_artist()

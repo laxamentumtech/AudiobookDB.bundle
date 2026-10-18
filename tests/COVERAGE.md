@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 206 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 225 tests, 0 network.
 
 Note: the py3 shim (`tests/plex_shim.py`) monkeypatches
 `ScoreTool.reduce_string` to decode bytes first, because the production
@@ -20,15 +20,15 @@ slightly py3-adapted scoring path; the bundle targets python2.7.
 | `search_tools.py` | `test_search_tools.py` |
 | `update_tools.py` | `test_update_tools.py` |
 
-## `test_agent.py` (21 tests) — end-to-end agent flows
+## `test_agent.py` (24 tests) — end-to-end agent flows
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestStartAndIdentity` | 5 | `Start`, `ValidatePrefs`, `getDateFromString`, agent name/prefix constants |
 | `TestAlbumSearch` | 4 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all) |
 | `TestAlbumQuickMatch` | 3 | `search` ASIN quick-match: album/filename ASIN → single 100-point result; unresolvable ASIN falls through |
-| `TestAlbumUpdate` | 6 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only) |
-| `TestArtistSearchAndUpdate` | 3 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched |
+| `TestAlbumUpdate` | 8 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only), forced update with empty/null description keeps the existing summary and still writes title/studio/styles/native ID |
+| `TestArtistSearchAndUpdate` | 4 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID |
 
 ## `test_api_client.py` (26 tests)
 
@@ -79,7 +79,7 @@ slightly py3-adapted scoring path; the bundle targets python2.7.
 | `TestArtistParseApiResponse` | 2 | artist `parse_api_response`: fixture, missing keys rejected |
 | `TestScoreTool` | 11 | `reduce_string`, `sum_scores`, `run_score_author`, `run_score_book` (perfect, empty people, ignore-boundary skip, index penalty, language deduction), `score_album`/`score_author` no-match → 0, `score_language` mismatch |
 
-## `test_update_tools.py` (54 tests)
+## `test_update_tools.py` (70 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -89,8 +89,8 @@ slightly py3-adapted scoring path; the bundle targets python2.7.
 | `TestReleaseSelection` | 6 | `select_release`: pinned wins, matched > only > lowest, only release, lowest-ID default, matched-not-present falls through |
 | `TestArtistResolve` | 5 | artist `resolve_item`: legacy migration, native person, 404 untouched, ambiguous ASIN untouched, wrong-type invalid |
 | `TestUpdateToolHelpers` | 8 | `cleanup_html` (books/authors), `replace_html_special`, `collect_metadata_to_log` (books + authors), `collect_metadata_arrs_to_log` (legacy typo), `getDateFromString`, `volume_prefix` |
-| `TestAlbumSetters` | 10 | `set_metadata_title` (+subtitle), `set_metadata_rating` (x2, none no-op), `set_metadata_date` guard, `set_metadata_studio`, `set_metadata_summary`, `set_metadata_sort_title` (+series), `set_metadata_tags` (+keep existing genres) |
-| `TestArtistSetters` | 7 | `set_metadata_title`, `set_metadata_description`, `set_metadata_sort_title` (last name/JR/single word), `set_metadata_tags`, `set_empty_variables` |
+| `TestAlbumSetters` | 18 | `set_metadata_title` (+subtitle), `set_metadata_rating` (x2, none no-op), `set_metadata_date` guard, `set_metadata_studio`, `set_metadata_summary` (+ empty/whitespace/markup-only description preserves an existing summary and is logged; forced and non-forced assignment unchanged), `set_metadata_sort_title` (+series), `set_metadata_tags` (+keep existing genres) |
+| `TestArtistSetters` | 15 | `set_metadata_title`, `set_metadata_description` (+ same keep-existing-on-empty policy as the album setter), `set_metadata_sort_title` (last name/JR/single word), `set_metadata_tags`, `set_empty_variables` |
 | `TestTagTool` | 5 | `TagTool` force-clears narrators (styles preserved when there are no narrators to re-add), non-force keeps existing, author/contributor handling, `similar=None` no-op |
 
 ## Legacy → new equivalence (legacy ref: Audnexus.bundle)
@@ -109,3 +109,4 @@ slightly py3-adapted scoring path; the bundle targets python2.7.
 | `matchedReleaseId` select | `select_release` (pinned > matched > only > lowest) |
 | `store_author_as_mood` pref | kept |
 | `clear_moods` on force | kept |
+| forced update with a missing/empty description sets `metadata.summary` to `''` (album `synopsis` and artist `description` alike) | an empty, whitespace-only or markup-only incoming description leaves an existing summary untouched (the unavailable summary is logged instead); genuinely present text still overwrites on a forced update |

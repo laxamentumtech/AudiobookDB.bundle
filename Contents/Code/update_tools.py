@@ -360,8 +360,14 @@ class AlbumUpdateTool(UpdateTool):
         """
             Sets the summary.
         """
+        self.cleanup_html()
+        # No description (or nothing but markup) upstream: don't erase an
+        # existing summary, forced update or not.
+        if not self.synopsis.strip():
+            log.info(
+                'No book description available; keeping existing summary.')
+            return
         if not self.metadata.summary or self.force:
-            self.cleanup_html()
             self.metadata.summary = self.synopsis
 
     def set_metadata_studio(self):
@@ -547,8 +553,14 @@ class ArtistUpdateTool(UpdateTool):
         """
             Set description of artist
         """
+        self.cleanup_html()
+        # No description (or nothing but markup) upstream: don't erase an
+        # existing summary, forced update or not.
+        if not self.description.strip():
+            log.info(
+                'No author description available; keeping existing summary.')
+            return
         if not self.metadata.summary or self.force:
-            self.cleanup_html()
             self.metadata.summary = self.description
 
     def set_empty_variables(self):

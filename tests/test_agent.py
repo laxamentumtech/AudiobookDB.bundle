@@ -391,6 +391,43 @@ class TestAlbumUpdate(unittest.TestCase):
         self.assertIsNone(metadata.studio)
         self.assertEqual(metadata.styles, set())
 
+    def test_empty_description_keeps_summary_and_completes_update(self):
+        """An unavailable description is non-destructive on a forced update."""
+        mapping = default_mapping()
+        book = load_fixture(BOOK_DETAIL)
+        book['description'] = ''
+        mapping[BASE + '/books/WQQDcMBQ3qUT'] = (200, api_body(book))
+        install_transport(None, mapping=mapping)
+        metadata = FakeMetadata('book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        metadata.summary = 'Existing summary'
+        agent.AudiobookAlbum().update(
+            metadata, FakeMedia(title='The Martian'),
+            plex_shim.Locale.Language.English, True)
+        # The summary survives; every other setter still ran.
+        self.assertEqual(metadata.summary, 'Existing summary')
+        self.assertEqual(metadata.title, 'The Martian')
+        self.assertEqual(metadata.studio, 'Podium Publishing')
+        self.assertEqual(metadata.styles, {'R.C. Bray'})
+        self.assertEqual(
+            metadata.id, 'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+
+    def test_null_description_keeps_summary_and_completes_update(self):
+        """A null description (API omitted the key) is non-destructive too."""
+        mapping = default_mapping()
+        book = load_fixture(BOOK_DETAIL)
+        book['description'] = None
+        mapping[BASE + '/books/WQQDcMBQ3qUT'] = (200, api_body(book))
+        install_transport(None, mapping=mapping)
+        metadata = FakeMetadata('book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        metadata.summary = 'Existing summary'
+        agent.AudiobookAlbum().update(
+            metadata, FakeMedia(title='The Martian'),
+            plex_shim.Locale.Language.English, True)
+        self.assertEqual(metadata.summary, 'Existing summary')
+        self.assertEqual(metadata.title, 'The Martian')
+        self.assertEqual(
+            metadata.id, 'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+
     def test_pinned_release_404_preserved(self):
         mapping = default_mapping()
         del mapping[BASE + '/releases/dPL9fC7YnK8X']
@@ -455,6 +492,24 @@ class TestArtistSearchAndUpdate(unittest.TestCase):
         self.assertEqual(metadata.id, 'B0AAAAAAAA')
         self.assertIsNone(metadata.title)
         self.assertIsNone(metadata.summary)
+
+    def test_empty_description_keeps_summary_and_completes_update(self):
+        """An unavailable bio is non-destructive on a forced update."""
+        mapping = default_mapping()
+        person = load_fixture(PERSON_DETAIL)
+        person['description'] = ''
+        mapping[BASE + '/people/ypMPwXzWXaiX'] = (200, api_body(person))
+        install_transport(None, mapping=mapping)
+        metadata = FakeMetadata('person.ypMPwXzWXaiX')
+        metadata.summary = 'Existing bio'
+        agent.AudiobookArtist().update(
+            metadata, FakeMedia(title='Andy Weir'),
+            plex_shim.Locale.Language.English, True)
+        # The bio survives; the rest of the update still ran.
+        self.assertEqual(metadata.summary, 'Existing bio')
+        self.assertEqual(metadata.title, 'Andy Weir')
+        self.assertIn('Fantasy', metadata.genres)
+        self.assertEqual(metadata.id, 'person.ypMPwXzWXaiX')
 
     def test_search_update_round_trip(self):
         # Search the author.
