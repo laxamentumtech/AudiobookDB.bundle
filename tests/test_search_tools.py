@@ -152,7 +152,8 @@ class TestCheckForAsinBooks(unittest.TestCase):
         self.assertTrue(tool.check_for_asin())
         self.assertEqual(tool.results.appended[0].id,
                          'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
-        self.assertEqual(tool.results.appended[0].name, 'The Martian w/ R.C. Bray')
+        self.assertEqual(tool.results.appended[0].name,
+                         'The Martian w/ R.C.Bray')
 
     def test_native_book_id(self):
         install_transport({
@@ -180,10 +181,32 @@ class TestCheckForAsinBooks(unittest.TestCase):
         self.assertTrue(tool.check_for_asin())
         self.assertEqual(tool.results.appended[0].id,
                          'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
-        self.assertEqual(tool.results.appended[0].name, 'The Martian w/ R.C. Bray')
+        self.assertEqual(tool.results.appended[0].name,
+                         'The Martian w/ R.C.Bray')
         self.assertEqual(tool.results.appended[0].year, 2013)
         self.assertTrue(
             tool.results.appended[0].thumb.endswith('/small.jpg'))
+
+    def test_native_book_release_id_pair_keeps_all_narrators(self):
+        release = load_fixture('release_detail_dPL9fC7YnK8X.json')
+        release['people'] = [
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'n1', 'name': 'Wil Wheaton'}},
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'n2', 'name': 'R.C. Bray'}},
+        ]
+        install_transport({
+            BASE + '/books/WQQDcMBQ3qUT': (
+                200, api_body(load_fixture('book_detail_WQQDcMBQ3qUT.json'))),
+            BASE + '/releases/dPL9fC7YnK8X': (200, api_body(release)),
+        })
+        tool = make('books',
+                    FakeMedia(album='book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        name = tool.results.appended[0].name
+        self.assertIn('W.Wheaton', name)
+        self.assertIn('R.C.Bray', name)
 
     def test_release_mismatch_rejected(self):
         other_release = load_fixture('release_detail_dPL9fC7YnK8X.json')
@@ -406,6 +429,20 @@ class TestCheckForAsinPeople(unittest.TestCase):
         self.assertTrue(tool.check_for_asin())
         self.assertEqual(tool.results.appended[0].id, 'person.ypMPwXzWXaiX')
 
+    def test_native_person_id_shows_disambiguation(self):
+        person = load_fixture('person_detail_ypMPwXzWXaiX.json')
+        person['disambiguation'] = 'Science fiction author'
+        install_transport({
+            BASE + '/people/ypMPwXzWXaiX': (200, api_body(person)),
+        })
+        tool = make('authors', FakeMedia(artist='person.ypMPwXzWXaiX'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended[0].id,
+                         'person.ypMPwXzWXaiX')
+        self.assertEqual(tool.results.appended[0].name,
+                         'Andy Weir (Science fiction author)')
+
     def test_native_person_id_404(self):
         install_transport({})
         tool = make('authors', FakeMedia(artist='person.ypMPwXzWXaiX'),
@@ -552,6 +589,96 @@ class TestNameToInitials(unittest.TestCase):
         self.assertEqual(self._t('"Andy Weir"'), 'A.Weir')
 
 
+class TestNarratorDisplay(unittest.TestCase):
+    def test_all_names_fit(self):
+        tool = make_album(FakeMedia())
+        self.assertEqual(
+            tool.format_narrators(['Wil Wheaton', 'R.C. Bray'], 60),
+            'W.Wheaton, R.C.Bray')
+
+    def test_count_alone_fits_small_budget(self):
+        tool = make_album(FakeMedia())
+        names = ['Alexandria Verylongsurname',
+                 'Bartholomew Verylongsurname',
+                 'Christopher Verylongsurname']
+        self.assertEqual(tool.format_narrators(names, 3), '+3')
+
+    def test_names_plus_remaining_count(self):
+        tool = make_album(FakeMedia())
+        names = ['Wil Wheaton', 'R.C. Bray', 'Scott Brick', 'Kate Reading']
+        display = tool.format_narrators(names, 24)
+        self.assertTrue(display.endswith('+2'), display)
+        self.assertLessEqual(len(display), 24)
+
+    def test_shortens_prefix_to_keep_count(self):
+        tool = make_album(FakeMedia())
+        label = tool.narrator_label('P' * 56, ['Wil Wheaton', 'R.C. Bray'])
+        self.assertLessEqual(len(label), 60)
+        self.assertTrue(label.endswith('+2'), label)
+
+    def test_shortens_prefix_for_long_single_narrator(self):
+        tool = make_album(FakeMedia())
+        label = tool.narrator_label('P' * 55,
+                                    ['Alexandria Verylongsurname'])
+        self.assertLessEqual(len(label), 60)
+        self.assertIn('A.Verylongsurname', label)
+
+    def test_bounds_a_single_narrator_too_long_to_fit(self):
+        tool = make_album(FakeMedia())
+        narrator = 'Alexandria ' + ('Verylongsurname' * 5)
+        label = tool.narrator_label('P' * 20, [narrator])
+        self.assertLessEqual(len(label), 60)
+        self.assertTrue(label.endswith('+1'), label)
+
+    def test_no_narrator_label_is_bounded(self):
+        tool = make_album(FakeMedia())
+        label = tool.narrator_label('T' * 70, [])
+        self.assertLessEqual(len(label), 60)
+
+    def test_no_narrator_long_suffix_is_bounded(self):
+        tool = make_album(FakeMedia())
+        label = tool.narrator_label(
+            'Book Title', [], ' [' + ('X' * 70) + ']')
+        self.assertLessEqual(len(label), 60)
+
+    def test_long_narrator_and_editions_keep_discriminators(self):
+        tool = make_album(FakeMedia())
+        narrator = 'Alexandria ' + ('Verylongsurname' * 5)
+        base = '"A Fairly Long Audiobook Title" by A.Author'
+        one = tool.narrator_label(
+            base, [narrator], ' [Unabridged 2011]')
+        two = tool.narrator_label(
+            base, [narrator], ' [Unabridged 2018]')
+        self.assertLessEqual(len(one), 60)
+        self.assertLessEqual(len(two), 60)
+        self.assertIn('[Unabridged 2011]', one)
+        self.assertIn('[Unabridged 2018]', two)
+        self.assertIn('+1', one)
+        self.assertNotEqual(one, two)
+
+    def test_intermediate_narrator_with_edition_keeps_title(self):
+        tool = make_album(FakeMedia())
+        label = tool.narrator_label(
+            'Book Title', ['N' * 45], ' [Unabridged 2011]')
+        self.assertLessEqual(len(label), 60)
+        self.assertIn('Book Title', label)
+        self.assertIn('[Unabridged 2011]', label)
+        self.assertTrue(label.endswith('+1'), label)
+
+    def test_edition_suffix_is_reserved(self):
+        tool = make_album(FakeMedia())
+        base = '"A Fairly Long Audiobook Title" by A.Author'
+        one = tool.narrator_label(
+            base, ['Wil Wheaton', 'R.C. Bray'], ' [Unabridged 2011]')
+        two = tool.narrator_label(
+            base, ['Wil Wheaton', 'R.C. Bray'], ' [Unabridged 2018]')
+        self.assertLessEqual(len(one), 60)
+        self.assertLessEqual(len(two), 60)
+        self.assertIn('[Unabridged 2011]', one)
+        self.assertIn('[Unabridged 2018]', two)
+        self.assertNotEqual(one, two)
+
+
 class TestNormalizeName(unittest.TestCase):
     def test_strips_brackets_chars_and_words(self):
         tool = make_album(FakeMedia(album='The Martian (Unabridged) [2013]'))
@@ -601,8 +728,7 @@ class TestAlbumParseApiResponse(unittest.TestCase):
         self.assertEqual(results[1]['book_id'], 'book.WQQDcMBQ3qUT')
         self.assertEqual(results[1]['title'], 'The Martian')
         self.assertEqual(results[1]['author'], [
-            {'name': 'Andy Weir', 'id': 'ypMPwXzWXaiX'},
-        ])
+            {'id': 'ypMPwXzWXaiX', 'name': 'Andy Weir'}])
         self.assertEqual(results[1]['narrator'], [])
         self.assertIsNone(results[1]['subtitle'])
         self.assertTrue(results[1]['thumb'].endswith('/small.jpg'))
@@ -669,7 +795,8 @@ class TestAlbumParseApiResponse(unittest.TestCase):
                 {'role': {'name': 'Narrator'},
                  'person': {'id': 'p1', 'name': 'N N'}}]},
         ])
-        self.assertEqual(results[0]['narrator'], [{'name': 'N N'}])
+        self.assertEqual(results[0]['narrator'], [
+            {'id': 'p1', 'name': 'N N'}])
 
 
 class TestPreSearchLogging(unittest.TestCase):
@@ -942,6 +1069,15 @@ class TestArtistParseApiResponse(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['id'], 'person.ypMPwXzWXaiX')
         self.assertEqual(results[0]['name'], 'Andy Weir')
+        self.assertIsNone(results[0]['disambiguation'])
+
+    def test_disambiguation_parsed(self):
+        tool = make_artist(FakeMedia())
+        results = tool.parse_api_response([
+            {'id': 'p1', 'name': 'Alex Smith',
+             'disambiguation': 'Narrator'},
+        ])
+        self.assertEqual(results[0]['disambiguation'], 'Narrator')
 
     def test_missing_keys_rejected(self):
         tool = make_artist(FakeMedia())
@@ -1046,6 +1182,50 @@ class TestScoreTool(unittest.TestCase):
                          'book.abc')
         self.assertEqual(self.score_book('Cafe 4', u'Caf\u00e9 Stories',
                                          seriesWithId=series), [])
+
+    def test_run_score_author_disambiguation_is_display_only(self):
+        helper = make_album(FakeMedia(artist='Alex Smith'))
+        result = {'id': 'person.p1', 'name': 'Alex Smith',
+                  'disambiguation': 'Narrator'}
+        info = []
+        ScoreTool(helper, 0, info, plex_shim.Util.LevenshteinDistance,
+                  result).run_score_author()
+        # The hint is visible, but scoring still compares the bare name.
+        self.assertEqual(info[0]['author'], 'Alex Smith (Narrator)')
+        self.assertEqual(info[0]['score'], 100)
+
+    def test_run_score_book_keeps_complete_narrator_list(self):
+        helper = make_album(FakeMedia(album='The Martian', artist='Andy Weir'))
+        helper.build_search_body()
+        result = {
+            'book_id': 'book.WQQDcMBQ3qUT',
+            'author': [{'id': 'a1', 'name': 'Andy Weir'}],
+            'narrator': [
+                {'id': 'n1', 'name': 'Wil Wheaton'},
+                {'id': 'n2', 'name': 'R.C. Bray'},
+            ],
+            'title': 'The Martian',
+        }
+        info = []
+        ScoreTool(helper, 0, info, plex_shim.Util.LevenshteinDistance,
+                  result).run_score_book()
+        self.assertEqual(info[0]['narrator'],
+                         ['Wil Wheaton', 'R.C. Bray'])
+
+    def test_run_score_book_name_only_author_credit_still_scores(self):
+        helper = make_album(FakeMedia(album='The Martian', artist='Andy Weir'))
+        helper.build_search_body()
+        result = {
+            'book_id': 'book.WQQDcMBQ3qUT',
+            'author': [{'name': 'Andy Weir'}],
+            'narrator': [],
+            'title': 'The Martian',
+        }
+        info = []
+        ScoreTool(helper, 0, info, plex_shim.Util.LevenshteinDistance,
+                  result).run_score_book()
+        # SearchDocumentBook.people permits name-only author credits.
+        self.assertEqual(info[0]['score'], 100)
 
     def test_literal_title_number_takes_precedence_over_series_position(self):
         series = [{'title': 'Dungeon Diving', 'position': {

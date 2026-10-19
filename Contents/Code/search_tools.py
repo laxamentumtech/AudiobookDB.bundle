@@ -6,6 +6,7 @@ import unicodedata
 from logging import Logging
 import api_client
 import metadata_ids
+from credits import collect_role_credits
 
 # Setup logger
 log = Logging()
@@ -114,31 +115,33 @@ def language_name(value):
     return value.strip()
 
 
-def release_narrator(release):
-    for credit in release.get('people') or []:
-        if not isinstance(credit, dict):
-            continue
-        if (credit.get('role') or {}).get('name') == 'Narrator':
-            name = ((credit.get('person') or {}).get('name') or '').strip()
-            if name:
-                return name
-    return None
+def release_narrators(release):
+    """
+        Complete ordered narrator-name list for one release. Name-only
+        credits are kept; person IDs are used for deduplication when present.
+    """
+    credits = collect_role_credits(
+        release.get('people'), 'release', release.get('id'), 'Narrator')
+    return [credit['name'] for credit in credits]
 
 
-def book_narrator(book, release_id=None):
+def book_narrators(book, release_id=None):
     releases = book.get('releases') or []
     if release_id:
         for release in releases:
             if release.get('id') == release_id:
-                return release_narrator(release)
+                return release_narrators(release)
     elif len(releases) == 1:
-        return release_narrator(releases[0])
-    return None
+        return release_narrators(releases[0])
+    return []
 
 
 NARRATOR_SEPARATOR = {
     'de': 'mit', 'fr': 'ac', 'it': 'con', 'es': 'con', 'ja': u'\u8aad\u307f',
 }
+
+# Approximate character budget for a Fix Match result description.
+DESCRIPTION_LIMIT = 60
 
 
 def append_narrator(label, narrator, lang):
@@ -220,6 +223,132 @@ class SearchTool:
                     asins.append(asin)
         return asins
 
+    def shorten_label(self, label, length):
+        """
+            Truncates a base label to ``length`` characters, marking the
+            cut with '..'. Returns the label unchanged when it already fits.
+        """
+        if length >= len(label):
+            return label
+        if length <= 2:
+            return label[:length]
+        return label[:length - 2] + '..'
+
+    def narrator_label(self, label, narrators, suffix=''):
+        """
+            Appends the complete narrator list to a result label within the
+            description budget.
+
+            ``suffix`` (for example an edition discriminator) is reserved
+            verbatim. The full label is kept when everything fits. Otherwise
+            the base label is shortened just enough to leave room for the
+            suffix, separator, and compacted narrator display, so the count
+            stays visible. If a single narrator name alone cannot fit, the
+            name is shortened too, keeping the total within the budget.
+        """
+        if not narrators:
+            suffix = self.shorten_label(suffix, DESCRIPTION_LIMIT)
+            return self.shorten_label(
+                label, max(DESCRIPTION_LIMIT - len(suffix), 0)) + suffix
+        separator = NARRATOR_SEPARATOR.get(self.lang, 'w/')
+        # A single name is kept whole whenever it can fit at all; otherwise
+        # the compact +1 marker replaces it. Multiple names are compacted
+        # by format_narrators against the remaining budget.
+        single_display = None
+        if len(narrators) == 1:
+            full_name = self.format_narrators(narrators, DESCRIPTION_LIMIT)
+            # Reserve the suffix too: a name that cannot fit beside it even
+            # with an empty base label is replaced by the compact count,
+            # leaving room for the book title.
+            max_display = DESCRIPTION_LIMIT - len(separator) - 2 \
+                - len(suffix)
+            single_display = full_name if len(full_name) <= max_display else '+1'
+        for length in range(len(label), -1, -1):
+            candidate = self.shorten_label(label, length)
+            budget = DESCRIPTION_LIMIT - len(candidate) - len(suffix) \
+                - len(separator) - 2
+            if single_display is not None:
+                display = single_display
+            else:
+                display = self.format_narrators(narrators, budget)
+            output = append_narrator(candidate + suffix, display, self.lang)
+            if len(output) <= DESCRIPTION_LIMIT:
+                return output
+        # Last resort: preserve the edition suffix and the explicit count,
+        # shortening the suffix only when it cannot fit beside +N.
+        compact = '+%d' % len(narrators)
+        for length in range(len(suffix), -1, -1):
+            candidate = self.shorten_label(suffix, length)
+            output = append_narrator(candidate, compact, self.lang)
+            if len(output) <= DESCRIPTION_LIMIT:
+                return output
+        return append_narrator('', compact, self.lang)
+
+    def format_narrators(self, names, limit):
+        """
+            Formats the complete narrator list for the Fix Match line.
+
+            Names are converted to initials and joined while they fit in
+            ``limit`` characters. When the list does not fit, the first
+            names are shown with an explicit ``+N`` count so no narrator
+            silently disappears. A single name is never truncated; when no
+            full name fits alongside the count, the count alone is shown.
+            The complete list stays in the result data.
+        """
+        initials = [
+            self.name_to_initials(name) for name in names if name
+        ]
+        if not initials:
+            return ''
+        full = ', '.join(initials)
+        if len(full) <= limit:
+            return full
+        if len(initials) == 1:
+            return full
+        for count in range(len(initials) - 1, 0, -1):
+            candidate = ', '.join(initials[:count]) + ' +%d' % (
+                len(initials) - count)
+            if len(candidate) <= limit:
+                return candidate
+        # No full name fits alongside the count: keep the count explicit
+        # instead of pushing it past the description budget.
+        return '+%d' % len(initials)
+
+    def name_to_initials(self, input_name):
+        """
+            Converts a name to initials.
+            Shorten input_name by splitting on whitespaces
+            Only the surname stays as whole, the rest gets truncated
+            and merged with dots.
+            Example: 'Arthur Conan Doyle' -> 'A.C.Doyle'
+            Example: 'J K Rowling' -> 'J.K.Rowling'
+            Example: 'J. R. R. Tolkien' -> 'J.R.R.Tolkien'
+        """
+
+        # Remove quotation marks
+        input_name = input_name.replace('"', '')
+
+        # Split name into parts
+        name_parts = self.clear_contributor_text(input_name).split()
+
+        # Check if prename and surname exist, otherwise exit
+        if len(name_parts) < 2:
+            return input_name
+
+        new_name = ""
+        # Truncate prenames
+        for part in name_parts[:-1]:
+            try:
+                # Try to get first letter of prename and add dot
+                new_name += part[0] + "." if part[1] != "." else part
+            except IndexError:
+                # If there is only one letter, add dot and return
+                new_name += part + "." if part != "." else part
+        # Add surname
+        new_name += name_parts[-1]
+
+        return new_name
+
     def check_for_asin(self):
         """
             Checks filename (for books) and/or search query for a
@@ -283,8 +412,8 @@ class SearchTool:
             return False
         title = book.get('title')
         if self.manual:
-            title = append_narrator(
-                title, book_narrator(book, matched_release_id), self.lang)
+            title = self.narrator_label(
+                title, book_narrators(book, matched_release_id))
         year = book.get('copyright')
         thumb = book_thumb(book)
         if matched_release_id:
@@ -331,11 +460,11 @@ class SearchTool:
                     release_id, book_id))
                 return False
             if self.manual:
-                title = append_narrator(title, release_narrator(release), self.lang)
+                title = self.narrator_label(title, release_narrators(release))
             year = release_year(release) or year
             thumb = first_image_thumb(release.get('images')) or thumb
         elif self.manual:
-            title = append_narrator(title, book_narrator(book), self.lang)
+            title = self.narrator_label(title, book_narrators(book))
         self.results.Append(
             MetadataSearchResult(
                 id=metadata_ids.serialize_book_id(book['id'], release_id),
@@ -369,6 +498,16 @@ class SearchTool:
             return appended
         return self.append_person_detail(hits[0]['id'], asin)
 
+    def person_display_name(self, person):
+        """
+            Appends the catalog disambiguation hint to a person's display
+            name. The hint is display-only; result identity stays person.id.
+        """
+        name = person.get('name')
+        if person.get('disambiguation'):
+            return '%s (%s)' % (name, person['disambiguation'])
+        return name
+
     def append_person_detail(self, person_id, asin=None):
         """
             Fetches a person detail, optionally confirming the Audible
@@ -393,7 +532,7 @@ class SearchTool:
             MetadataSearchResult(
                 id=metadata_ids.serialize_person_id(person['id']),
                 lang=self.lang,
-                name=person.get('name'),
+                name=self.person_display_name(person),
                 score=100,
                 year=None,
             )
@@ -413,7 +552,7 @@ class SearchTool:
             MetadataSearchResult(
                 id=metadata_ids.serialize_person_id(person['id']),
                 lang=self.lang,
-                name=person.get('name'),
+                name=self.person_display_name(person),
                 score=100,
                 year=None,
             )
@@ -606,41 +745,6 @@ class AlbumSearchTool(SearchTool):
             return None
         return names[0]
 
-    def name_to_initials(self, input_name):
-        """
-            Converts a name to initials.
-            Shorten input_name by splitting on whitespaces
-            Only the surname stays as whole, the rest gets truncated
-            and merged with dots.
-            Example: 'Arthur Conan Doyle' -> 'A.C.Doyle'
-            Example: 'J K Rowling' -> 'J.K.Rowling'
-            Example: 'J. R. R. Tolkien' -> 'J.R.R.Tolkien'
-        """
-
-        # Remove quotation marks
-        input_name = input_name.replace('"', '')
-
-        # Split name into parts
-        name_parts = self.clear_contributor_text(input_name).split()
-
-        # Check if prename and surname exist, otherwise exit
-        if len(name_parts) < 2:
-            return input_name
-
-        new_name = ""
-        # Truncate prenames
-        for part in name_parts[:-1]:
-            try:
-                # Try to get first letter of prename and add dot
-                new_name += part[0] + "." if part[1] != "." else part
-            except IndexError:
-                # If there is only one letter, add dot and return
-                new_name += part + "." if part != "." else part
-        # Add surname
-        new_name += name_parts[-1]
-
-        return new_name
-
     def normalize_name(self):
         """
             Normalizes the album name by removing
@@ -675,28 +779,13 @@ class AlbumSearchTool(SearchTool):
         """
         search_results = []
         for item in api_response:
-            if not isinstance(item, dict) or not item.get('id') or not item.get('title'):
+            if not isinstance(item, dict) or not item.get('id') \
+                    or not item.get('title'):
                 continue
-            authors = []
-            narrator = []
-            for credit in item.get('people') or []:
-                if not isinstance(credit, dict):
-                    continue
-                person = credit.get('person')
-                role = credit.get('role')
-                if not isinstance(person, dict) or not isinstance(role, dict):
-                    continue
-                name = person.get('name')
-                role_name = role.get('name')
-                if not name:
-                    continue
-                if role_name == 'Author':
-                    author = {'name': name}
-                    if person.get('id'):
-                        author['id'] = person['id']
-                    authors.append(author)
-                elif role_name == 'Narrator' and not narrator:
-                    narrator = [{'name': name}]
+            authors = collect_role_credits(
+                item.get('people'), 'book', item['id'], 'Author')
+            narrator = collect_role_credits(
+                item.get('people'), 'book', item['id'], 'Narrator')
             search_results.append({
                 'book_id': metadata_ids.serialize_book_id(item['id']),
                 'author': authors,
@@ -874,6 +963,7 @@ class ArtistSearchTool(SearchTool):
                         'id': metadata_ids.serialize_person_id(item['id']),
                         'name': item['name'],
                         'description': item.get('description'),
+                        'disambiguation': item.get('disambiguation'),
                         'genres': item.get('genres'),
                     }
                 )
@@ -1071,6 +1161,7 @@ class ScoreTool:
     def __init__(self, helper, index, info, levenshtein_distance,
                  result_dict):
         self.calculate_score = levenshtein_distance
+        self.disambiguation = None
         self.helper = helper
         self.index = index
         self.info = info
@@ -1079,6 +1170,7 @@ class ScoreTool:
     def run_score_author(self):
         self.asin = self.result_dict['id']
         self.author = self.result_dict['name']
+        self.disambiguation = self.result_dict.get('disambiguation')
         self.narrator = None
         self.title = None
         self.thumb = None
@@ -1094,8 +1186,9 @@ class ScoreTool:
         self.asin = self.result_dict['book_id']
         authors = [author['name'] for author in self.result_dict['author']]
         self.author = authors[0] if authors else ''
+        self.disambiguation = None
         narrators = self.result_dict['narrator']
-        self.narrator = narrators[0]['name'] if narrators else ''
+        self.narrator = [n['name'] for n in narrators] if narrators else []
         self.title = self.result_dict['title']
         self.thumb = self.result_dict.get('thumb')
         title_score = self.score_album(query, self.title,
@@ -1127,7 +1220,10 @@ class ScoreTool:
     def score_create_result(self, score):
         result = {'id': self.asin, 'score': score}
         if self.author:
-            result['author'] = self.author
+            author = self.author
+            if self.disambiguation:
+                author = '%s (%s)' % (self.author, self.disambiguation)
+            result['author'] = author
         if self.narrator:
             result['narrator'] = self.narrator
         if self.title:
