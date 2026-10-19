@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-`python:2.7-slim` in docker, full unittest discovery). 273 tests, 0 network.
+`python:2.7-slim` in docker, full unittest discovery). 275 tests, 0 network.
 
 Note: the py3 shim (`tests/plex_shim.py`) monkeypatches
 `ScoreTool.reduce_string` to decode bytes first, because the production
@@ -62,7 +62,7 @@ slightly py3-adapted scoring path; the bundle targets python2.7.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (84 tests)
+## `test_search_tools.py` (86 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -79,7 +79,7 @@ slightly py3-adapted scoring path; the bundle targets python2.7.
 | `TestArtistMultiArtist` | 5 | `find_non_contributor`, `handle_multi_artist`, `get_primary_author` |
 | `TestArtistParseApiResponse` | 2 | artist `parse_api_response`: fixture, missing keys rejected |
 | `TestScoreTool` | 11 | `reduce_string`, `sum_scores`, `run_score_author`, `run_score_book` (perfect, empty people, ignore-boundary skip, index penalty, language deduction), `score_album`/`score_author` no-match → 0, `score_language` mismatch |
-| `TestScoreOrdering` | 13 | `score_ordering` / `ordering_suffix` / `series_position`: the four reported wrong pins drop below the append floor automatically and keep their manual scores; same-number titles and supporting memberships are preserved; numeric-ordinal fallback, disjoint spans, unrelated/absent/fractional/range data; course, pack, volume, year, Roman and spelled-out controls |
+| `TestScoreOrdering` | 15 | `score_ordering` / `ordering_suffix` / `series_position`: the four reported wrong pins drop below the append floor automatically and keep their manual scores; same-number titles and supporting memberships are preserved; unrelated title numbers cannot override or manufacture membership evidence; numeric-ordinal fallback, disjoint spans, absent/fractional/range data; course, pack, volume, year, Roman and spelled-out controls |
 
 ## `test_update_tools.py` (71 tests)
 

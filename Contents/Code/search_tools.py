@@ -881,8 +881,10 @@ class ScoreTool:
         supported = False
         contradicted = False
 
-        # The candidate's own title number is the strongest evidence.
-        if candidate_number is not None:
+        # The candidate's own title number is evidence only when the title
+        # stem itself matches; a matching series membership does not make an
+        # unrelated title's numbering scheme comparable.
+        if candidate_number is not None and candidate_key == stem_key:
             if candidate_number == number:
                 supported = True
             else:

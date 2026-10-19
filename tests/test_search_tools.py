@@ -783,6 +783,16 @@ class TestScoreOrdering(unittest.TestCase):
                               series)
         self.assertEqual(tool.score_ordering(), 60)
 
+    def test_unrelated_title_number_cannot_override_membership(self):
+        series = [self._entry('Swing Shift', '1', self._point(1))]
+        tool, _ = self._score('Swing Shift Book 2', 'Side Story 2', series)
+        self.assertEqual(tool.score_ordering(), 60)
+
+    def test_unrelated_title_number_with_unknown_membership_abstains(self):
+        series = [self._entry('Swing Shift', None, self._absent())]
+        tool, _ = self._score('Swing Shift Book 2', 'Side Story 3', series)
+        self.assertEqual(tool.score_ordering(), 0)
+
     def test_multiple_relevant_memberships_order_independent(self):
         first = self._entry('Swing Shift', '2', self._point(2))
         second = self._entry('Swing Shift', '9', self._point(9))
