@@ -2,7 +2,7 @@
 
 Plex audiobook metadata agent powered by the AudiobookDB catalog, with direct ASIN and native-ID matching.
 
-[AudiobookDB Agent](https://github.com/laxamentumtech/AudiobookDB.bundle) is a [Plex](https://www.plex.tv) metadata agent for audiobook libraries that sources everything — books, releases, and people — from the [AudiobookDB](https://audiobookdb.org) public API (`<https://audiobookdb.org/api>`). It is the successor to the Audnexus agent and installs alongside it: it registers under its own plug-in identifier (`com.plexapp.agents.audiobookdb`), so the legacy `Audnexus.bundle` can stay installed. Each library keeps using whichever agent is selected for it until you switch it over, and old pinned Audnexus IDs migrate safely (see [Migrating from Audnexus](#migrating-from-audnexus)).
+[AudiobookDB Agent](https://github.com/laxamentumtech/AudiobookDB.bundle) is a [Plex](https://www.plex.tv) metadata agent for audiobook libraries that sources everything — books, releases, and people — from the [AudiobookDB](https://audiobookdb.org) public API (`https://audiobookdb.org/api`). It is the successor to the Audnexus agent and installs alongside it: it registers under its own plug-in identifier (`com.plexapp.agents.audiobookdb`), so the legacy `Audnexus.bundle` can stay installed. Each library keeps using whichever agent is selected for it until you switch it over, and old pinned Audnexus IDs migrate safely (see [Migrating from Audnexus](#migrating-from-audnexus)).
 
 What sets it apart:
 
@@ -16,8 +16,8 @@ What sets it apart:
 - [Usage](#usage)
 - [Configuration](#configuration)
 - [Quick match](#quick-match)
-- [Migrating from Audnexus](#migrating-from-audnexus)
 - [API details](#api-details)
+- [Migrating from Audnexus](#migrating-from-audnexus)
 - [Source installation](#source-installation)
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
@@ -58,15 +58,15 @@ After a restart, *AudiobookDB Agent* appears in the agent picker for audiobook l
 
 ## Usage
 
-1. Open an audiobook library's **Library Settings** in Plex (or create a new one).
-2. Choose **AudiobookDB Agent** as the agent. Existing libraries keep their current agent until you switch it here.
+1. Open the **Edit Library** dialog for a Music library that holds your audiobooks in Plex (or create a new Music library).
+2. On the **Advanced** tab, choose **AudiobookDB Agent** from the **Agent** drop-down. Existing libraries keep their current agent until you switch it here.
 3. Optionally set the preferences below, then run a refresh.
 
-A refresh populates from AudiobookDB: for albums — title, sort title, summary, studio, original release date, rating, genres, moods/styles, poster, and the native ID; for artists (stored as Plex *people*) — name, sort title, summary, genres, poster, and native ID. Series information is stored as Mood tags, not as Plex collections.
+A refresh populates from AudiobookDB: books appear as albums — title, sort title, summary, studio, original release date, rating, genres, moods/styles, poster, and the native ID; authors appear as artists — name, sort title, summary, genres, poster, and native ID. Narrators are stored as Style tags, not as separate profiles. Series information is stored as Mood tags, not as Plex collections.
 
 ## Configuration
 
-Preferences are set in the agent's settings (library settings → agent).
+Preferences are set in the Plex Web App under **Settings → Server → Agents**: choose the agent, then click the gear icon to its right (see Plex's [Agents](https://support.plex.tv/articles/200241558-agents/) article).
 
 | Preference | Default | Description |
 |---|---|---|
@@ -79,16 +79,16 @@ Preferences are set in the agent's settings (library settings → agent).
 
 ## Quick match
 
-Put an ASIN in the manual search field (or in the media filename for albums) and the agent resolves it directly to a single score-100 result, skipping normal search:
+Put an ASIN in the manual search field (or in the media filename for albums) and the agent resolves it directly to a score-100 result, skipping normal search:
 
-- `B0XXXXXXXXXX` — an Audible ASIN, resolved through
+- `B0XXXXXXXX` — an Audible ASIN, resolved through
   `GET /audiobooks/external/audible/{ASIN}` (albums) or
-  `GET /people?external=Audible:{ASIN}` (artists).
+  `GET /people?external=Audible:{ASIN}` (artists). A book ASIN resolves to a single title, but a person ASIN shared by multiple people can yield several choices — use **Fix Match** (or enter the person ID manually) to pick one.
 - Native IDs `book.<id>[.release.<id>]` and `person.<id>` are also accepted as manual search input; they are validated against the corresponding detail endpoint before a score-100 result is appended.
 
 ## API details
 
-- Base URL: `https://audiobookdb.org/api` — see the [API documentation](https://audiobookdb.org/api).
+- Base URL: `https://audiobookdb.org/api` — see the [API documentation](https://audiobookdb.org/docs/api).
 - Free-text search requires a query of at least 3 characters.
 - Calls retry up to 4 total attempts, honouring a server-supplied `Retry-After` (capped at 60 s).
 - The `api_key` preference is attached to requests to the API origin only.
@@ -110,10 +110,10 @@ Two cases are left untouched and reported in the log:
 <details>
 <summary>Install from the develop branch</summary>
 
-Clone the `develop` branch (the default branch is a blank shared base, not the code) into your Plex `Plug-ins` directory — the `Contents/` folder must sit directly inside `AudiobookDB.bundle/` — then restart Plex:
+Clone the `develop` branch into your Plex [Plug-ins](https://support.plex.tv/articles/201106098-how-do-i-find-the-plug-ins-folder/) directory — the `Contents/` folder must sit directly inside `AudiobookDB.bundle/` — then restart Plex:
 
 ```sh
-cd "$PLEX_PLUGINS_DIR"
+cd "$HOME/Library/Application Support/Plex Media Server/Plug-ins"   # replace with your Plug-ins path
 git clone -b develop https://github.com/laxamentumtech/AudiobookDB.bundle.git
 ```
 
@@ -123,7 +123,7 @@ git clone -b develop https://github.com/laxamentumtech/AudiobookDB.bundle.git
 
 There is no separate contributor guide; the essentials:
 
-- Work on the `develop` branch (the default branch is a blank shared base).
+- Work on the `develop` branch.
 - Tests run offline, fixture-backed, through plain `unittest`:
 
   ```sh
