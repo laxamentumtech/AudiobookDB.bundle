@@ -3,6 +3,7 @@ from logging import Logging
 import api_client
 import metadata_ids
 import re
+from credits import collect_role_credits
 
 # Setup logger
 log = Logging()
@@ -269,24 +270,18 @@ class AlbumUpdateTool(UpdateTool):
         self.title = book.get('title') or ''
         self.subtitle = book.get('subtitle') or ''
         self.synopsis = book.get('description') or ''
-        # People whose person is absent/null or has no name are dropped:
-        # tagging downstream calls re.match() (authors) and .strip()
-        # (narrators) on the name, which would raise before the native ID
-        # commits.
-        self.author = [
-            {'name': p['person']['name']}
-            for p in book.get('people') or []
-            if (p.get('role') or {}).get('name') == 'Author'
-            and ((p.get('person') or {}).get('name') or '').strip()
-        ]
+        # Authors attach to the book; narrators attach to the selected
+        # release. Each credit keeps its person.id and is deduplicated by
+        # (scope, person.id, role), so same-named people stay distinct.
+        # Entries whose person is absent/null, has no ID, or has a blank
+        # name are dropped: tagging calls re.match()/.strip() on the name.
+        self.author = collect_role_credits(
+            book.get('people'), 'book', book.get('id'), 'Author')
         self.narrator = []
         if release:
-            self.narrator = [
-                {'name': p['person']['name']}
-                for p in release.get('people') or []
-                if (p.get('role') or {}).get('name') == 'Narrator'
-                and ((p.get('person') or {}).get('name') or '').strip()
-            ]
+            self.narrator = collect_role_credits(
+                release.get('people'), 'release', release.get('id'),
+                'Narrator')
         self.studio = ((release.get('publisher') or {}).get('name')
                        or '') if release else ''
         self.date = (self.getDateFromString(release.get('releaseDate'))
