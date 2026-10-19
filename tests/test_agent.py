@@ -217,12 +217,12 @@ class TestAlbumSearch(unittest.TestCase):
             },
         ]
 
-    def _search(self, hits, manual):
+    def _search(self, hits, manual, **media_kw):
         install_transport(hits)
         results = _Results()
         agent.AudiobookAlbum().search(
-            results, album_media(), plex_shim.Locale.Language.English,
-            manual)
+            results, album_media(**media_kw),
+            plex_shim.Locale.Language.English, manual)
         return results.appended
 
     def test_search_breaks_on_good_score(self):
@@ -258,6 +258,82 @@ class TestAlbumSearch(unittest.TestCase):
         self.assertIsNone(r.year)
         self.assertIn('The Martian', r.name)
         self.assertIn('A.Weir', r.name)
+
+    def test_ordering_conflict_not_appended_automatically(self):
+        hit = load_fixture('search_books_ordering_gaps.json')[0]
+        appended = self._search(
+            [hit], manual=False, album='Swing Shift Book 2',
+            artist='William D. Arand')
+        self.assertEqual(appended, [])
+
+    def test_ordering_conflict_visible_manually(self):
+        hit = load_fixture('search_books_ordering_gaps.json')[0]
+        appended = self._search(
+            [hit], manual=True, album='Swing Shift Book 2',
+            artist='William D. Arand')
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0].score, 90)
+
+    def test_ordering_conflict_visible_manually_without_artist(self):
+        hit = load_fixture('search_books_ordering_gaps.json')[0]
+        appended = self._search(
+            [hit], manual=True, album='Swing Shift Book 2', artist=None)
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0].score, 70)
+
+    def test_ordering_conflict_omitted_while_supported_kept(self):
+        fixture = load_fixture('search_books_ordering_gaps.json')
+        appended = self._search(
+            [fixture[0], fixture[1]], manual=False,
+            album='Swing Shift Book 2', artist='William D. Arand')
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0].id, 'book.ssTwo0000001')
+
+    def test_unnumbered_candidate_without_signal_not_appended(self):
+        hit = load_fixture('search_books_ordering_gaps.json')[4]
+        appended = self._search(
+            [hit], manual=False, album='Swing Shift Book 2',
+            artist='William D. Arand')
+        self.assertEqual(appended, [])
+
+    def test_first_book_unnumbered_candidate_appended(self):
+        hit = load_fixture('search_books_ordering_gaps.json')[4]
+        appended = self._search(
+            [hit], manual=False, album='Swing Shift Book 1',
+            artist='William D. Arand')
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0].score, 90)
+
+    def test_non_conflicting_midrange_result_still_appends(self):
+        hits = [{
+            'id': 'cccccccccccc',
+            'title': 'The Martian Viking',
+            'people': [
+                {'role': {'name': 'Author'},
+                 'person': {'id': 'p1', 'name': 'Andy Weir'}}
+            ],
+            'originalLanguage': 'English',
+        }]
+        appended = self._search(hits, manual=False)
+        self.assertEqual(len(appended), 1)
+        self.assertTrue(45 <= appended[0].score < 98)
+
+    def test_course_number_title_not_penalised(self):
+        fixture = load_fixture('search_books_numbering_exceptions.json')
+        appended = self._search(
+            [fixture[2]], manual=False, album='Dungeon Diving 201',
+            artist='Author Name')
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0].score, 100)
+
+    def test_pack_title_not_penalised(self):
+        fixture = load_fixture('search_books_numbering_exceptions.json')
+        appended = self._search(
+            [fixture[3]], manual=False,
+            album="The Valens Legacy Publisher's Pack 2",
+            artist='Author Name')
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0].score, 100)
 
     def test_search_posts_search_body(self):
         install_transport(load_fixture('search_books_martian.json'))

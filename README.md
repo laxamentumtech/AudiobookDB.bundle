@@ -55,6 +55,21 @@ search:
   manual search input; they are validated against the corresponding detail
   endpoint before a score-100 result is appended.
 
+## Numbered series
+
+Automatic album matching reads a trailing book ordinal from the folder name
+(`Book 2`, `#2`, `2`) and deducts 60 points when a catalog candidate
+positively contradicts it. A candidate whose own title carries the same
+number, or whose series membership covers it, is never penalised; an
+unnumbered candidate is rejected when the folder claims book 2 or later, so a
+correct sibling result can win instead.
+
+The check abstains for pack and volume titles (`Publisher's Pack 2`,
+`Volume 2`), explicit ranges (`Books 1-3`), years, fractions, Roman numerals
+and spelled-out numbers, and for absent or incomplete series-position data.
+Manual Fix Match is not penalised, so every candidate remains listed at its
+normal score and a wrong automatic pick can be overridden by hand.
+
 ## Migrating from Audnexus
 
 Once a library is switched to this agent, its old pinned IDs (`ASIN` /

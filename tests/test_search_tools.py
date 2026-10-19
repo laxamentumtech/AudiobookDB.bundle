@@ -84,9 +84,10 @@ def make_artist(media=None, manual=False):
 
 
 class FakeScoreHelper(object):
-    def __init__(self, media=None, lang=None):
+    def __init__(self, media=None, lang=None, manual=False):
         self.media = media
         self.lang = lang if lang is not None else plex_shim.Locale.Language.English
+        self.manual = manual
 
 
 class TestCheckForAsinBooks(unittest.TestCase):
@@ -416,6 +417,35 @@ class TestAlbumParseApiResponse(unittest.TestCase):
         ])
         self.assertEqual(results[0]['narrator'], [{'name': 'N N'}])
 
+    def test_series_with_id_preserved(self):
+        tool = make_album(FakeMedia())
+        results = tool.parse_api_response(
+            load_fixture('search_books_ordering_gaps.json'))
+        series = results[0]['seriesWithId']
+        self.assertEqual(len(series), 1)
+        self.assertEqual(series[0]['title'], 'Swing Shift')
+        self.assertEqual(series[0]['ordinal'], '1')
+        self.assertEqual(
+            series[0]['position']['spans'], [{'start': 1, 'end': 1}])
+
+    def test_missing_series_defaults_empty(self):
+        tool = make_album(FakeMedia())
+        results = tool.parse_api_response([
+            {'id': 'abc', 'title': 'T', 'people': []},
+        ])
+        self.assertEqual(results[0]['seriesWithId'], [])
+
+    def test_non_dict_series_entries_skipped(self):
+        tool = make_album(FakeMedia())
+        results = tool.parse_api_response([
+            {'id': 'abc', 'title': 'T', 'people': [],
+             'seriesWithId': [None, 'nope', {'title': 'Series'}]},
+        ])
+        self.assertEqual(results[0]['seriesWithId'],
+                         [{'title': 'Series',
+                           'ordinal': None,
+                           'position': None}])
+
 
 class TestPreSearchLogging(unittest.TestCase):
     def test_album_missing_uses_track_title(self):
@@ -515,10 +545,11 @@ class TestArtistParseApiResponse(unittest.TestCase):
 
 class TestScoreTool(unittest.TestCase):
     def _score(self, result_dict, index=0, year=None,
-               media=None, lang=None):
+               media=None, lang=None, manual=False):
         helper = FakeScoreHelper(
             media if media is not None else FakeMedia(),
-            lang
+            lang,
+            manual
         )
         info = []
         tool = ScoreTool(
@@ -646,6 +677,217 @@ class TestScoreTool(unittest.TestCase):
         tool, info = self._score(result, media=media)
         tool.run_score_book()
         self.assertEqual(info[0]['score'], 98)
+
+
+class TestScoreOrdering(unittest.TestCase):
+    """Automatic series-ordinal disambiguation."""
+
+    def _entry(self, title, ordinal=None, position=None):
+        return {'title': title, 'ordinal': ordinal, 'position': position}
+
+    def _point(self, value):
+        return {
+            'kind': 'point', 'status': 'complete',
+            'value': str(value), 'label': str(value), 'sortKey': value,
+            'spans': [{'start': value, 'end': value}],
+        }
+
+    def _range(self, start, end):
+        return {
+            'kind': 'range', 'status': 'complete',
+            'value': None, 'label': '%s-%s' % (start, end),
+            'sortKey': start,
+            'spans': [{'start': start, 'end': end}],
+        }
+
+    def _absent(self):
+        return {
+            'kind': 'unknown', 'status': 'absent',
+            'value': None, 'label': '', 'sortKey': 5, 'spans': [],
+        }
+
+    def _score(self, album, title, series=None, manual=False,
+               artist='Andy Weir'):
+        media = FakeMedia(album=album, artist=artist)
+        result = {
+            'book_id': 'book.ordering',
+            'author': [{'name': artist}] if artist else [],
+            'date': None,
+            'language': 'English',
+            'narrator': [],
+            'title': title,
+            'seriesWithId': series if series is not None else [],
+        }
+        info = []
+        tool = ScoreTool(
+            FakeScoreHelper(media, manual=manual), 0, info,
+            plex_shim.Locale.Language.English,
+            plex_shim.Util.LevenshteinDistance, result, None)
+        tool.run_score_book()
+        return tool, info
+
+    def test_targets_deduct_60_automatically_and_0_manually(self):
+        targets = [
+            ('Domestic Decay Book 4', 'Domestic Decay 2', '2', 30),
+            ('Cultivating Chaos 2', 'Cultivating Chaos', '1', 38),
+            ('Swing Shift Book 3', 'Swing Shift', '1', 30),
+            ('Swing Shift Book 2', 'Swing Shift', '1', 30),
+        ]
+        for album, title, ordinal, automatic in targets:
+            series = [
+                self._entry(title, ordinal, self._point(int(ordinal)))
+            ]
+            tool, info = self._score(album, title, series)
+            self.assertEqual(tool.score_ordering(), 60)
+            self.assertEqual(info, [])
+            self.assertEqual(
+                tool.INITIAL_SCORE - tool.score_album(title)
+                - tool.ORDERING_PENALTY,
+                automatic)
+
+            tool_manual, info_manual = self._score(
+                album, title, series, manual=True)
+            self.assertEqual(tool_manual.score_ordering(), 0)
+            self.assertEqual(len(info_manual), 1)
+            self.assertEqual(info_manual[0]['score'], automatic + 60)
+
+    def test_matching_ordinal_unnumbered_candidate_not_penalised(self):
+        series = [self._entry('Swing Shift', '2', self._point(2))]
+        tool, info = self._score('Swing Shift Book 2', 'Swing Shift', series)
+        self.assertEqual(tool.score_ordering(), 0)
+        self.assertEqual(info[0]['score'], 90)
+
+    def test_missing_signal_rejects_book_two_keeps_book_one(self):
+        self.assertEqual(
+            self._score('Swing Shift Book 2', 'Swing Shift')[0]
+            .score_ordering(), 60)
+        self.assertEqual(
+            self._score('Swing Shift Book 1', 'Swing Shift')[0]
+            .score_ordering(), 0)
+
+    def test_title_number_overrides_different_ordinal(self):
+        series = [self._entry('Dungeon Diving', '5', self._point(5))]
+        tool, _ = self._score(
+            'Dungeon Diving 201', 'Dungeon Diving 201', series)
+        self.assertEqual(tool.score_ordering(), 0)
+
+    def test_matching_relevant_ordinal_supports_course_number(self):
+        series = [self._entry('Dungeon Diving', '1', self._point(1))]
+        tool, _ = self._score(
+            'Dungeon Diving 101', 'Dungeon Diving 101', series)
+        self.assertEqual(tool.score_ordering(), 0)
+
+    def test_unrelated_series_ordinal_cannot_support(self):
+        series = [self._entry('Other Series', '4', self._point(4))]
+        tool, _ = self._score('Swing Shift Book 4', 'Swing Shift Book 3',
+                              series)
+        self.assertEqual(tool.score_ordering(), 60)
+
+    def test_multiple_relevant_memberships_order_independent(self):
+        first = self._entry('Swing Shift', '2', self._point(2))
+        second = self._entry('Swing Shift', '9', self._point(9))
+        for series in ([first, second], [second, first]):
+            tool, _ = self._score('Swing Shift Book 2', 'Swing Shift',
+                                  series)
+            self.assertEqual(tool.score_ordering(), 0)
+
+    def test_numeric_ordinal_supplies_missing_position(self):
+        for position in (None, {}):
+            entry = {'title': 'Swing Shift', 'ordinal': '2',
+                     'position': position}
+            tool, _ = self._score('Swing Shift Book 2', 'Swing Shift',
+                                  [entry])
+            self.assertEqual(tool.score_ordering(), 0)
+            entry = {'title': 'Swing Shift', 'ordinal': '1',
+                     'position': position}
+            tool, _ = self._score('Swing Shift Book 2', 'Swing Shift',
+                                  [entry])
+            self.assertEqual(tool.score_ordering(), 60)
+
+    def test_disjoint_spans_use_containment(self):
+        position = {
+            'kind': 'range', 'status': 'complete', 'value': None,
+            'label': '1-2,5-6', 'sortKey': 1,
+            'spans': [{'start': 1, 'end': 2}, {'start': 5, 'end': 6}],
+        }
+        series = [self._entry('Swing Shift', None, position)]
+        self.assertEqual(
+            self._score('Swing Shift Book 2', 'Swing Shift', series)[0]
+            .score_ordering(), 0)
+        self.assertEqual(
+            self._score('Swing Shift Book 3', 'Swing Shift', series)[0]
+            .score_ordering(), 60)
+
+    def test_unknown_and_fractional_positions_abstain(self):
+        fractional = {
+            'kind': 'point', 'status': 'complete',
+            'value': '1.5', 'label': '1.5', 'sortKey': 1.5, 'spans': [],
+        }
+        fractional_label = {
+            'kind': 'point', 'status': 'complete',
+            'value': '1.5', 'label': '1', 'sortKey': 1.5, 'spans': [],
+        }
+        for position in (self._absent(), fractional, fractional_label, None):
+            tool, _ = self._score(
+                'Swing Shift Book 2', 'Swing Shift',
+                [self._entry('Swing Shift', None, position)])
+            self.assertEqual(tool.score_ordering(), 0)
+
+    def test_range_endpoints_inclusive(self):
+        series = [self._entry('Swing Shift', None, self._range(1, 3))]
+        self.assertEqual(
+            self._score('Swing Shift Book 1', 'Swing Shift', series)[0]
+            .score_ordering(), 0)
+        self.assertEqual(
+            self._score('Swing Shift Book 3', 'Swing Shift', series)[0]
+            .score_ordering(), 0)
+        self.assertEqual(
+            self._score('Swing Shift Book 4', 'Swing Shift', series)[0]
+            .score_ordering(), 60)
+
+    def test_ordering_suffix_extraction(self):
+        tool, _ = self._score('Swing Shift', 'Swing Shift')
+        self.assertEqual(
+            tool.ordering_suffix('Swing Shift Book 2'), ('Swing Shift', 2))
+        self.assertEqual(
+            tool.ordering_suffix('Swing Shift Book #2'), ('Swing Shift', 2))
+        self.assertEqual(
+            tool.ordering_suffix('Swing Shift #2'), ('Swing Shift', 2))
+        self.assertEqual(
+            tool.ordering_suffix('Swing Shift - 2'), ('Swing Shift', 2))
+        self.assertIsNone(tool.ordering_suffix('Swing Shift Books 1-3'))
+        self.assertIsNone(
+            tool.ordering_suffix(u'Swing Shift Books 1\u20133'))
+        self.assertIsNone(tool.ordering_suffix('Swing Shift 1 to 3'))
+        self.assertIsNone(tool.ordering_suffix('Swing Shift 1.5'))
+        self.assertIsNone(tool.ordering_suffix('Swing Shift 2020'))
+        self.assertIsNone(tool.ordering_suffix('Swing Shift Book IV'))
+        self.assertIsNone(tool.ordering_suffix('Swing Shift Book Two'))
+        self.assertIsNone(
+            tool.ordering_suffix("Swing Shift Publisher's Pack 2"))
+        self.assertIsNone(tool.ordering_suffix('Swing Shift Volume 2'))
+        self.assertIsNone(tool.ordering_suffix('Swing Shift Vol. 2'))
+        self.assertIsNone(tool.ordering_suffix('1984'))
+
+    def test_non_ordinal_titles_abstain(self):
+        controls = [
+            ("The Valens Legacy Publisher's Pack 2",
+             "The Valens Legacy Publisher's Pack 2"),
+            ('My Ninja Girl Volume 2', 'My Ninja Girl Volume 2'),
+            ('Swing Shift Books 1-3', 'Swing Shift'),
+            (u'Swing Shift Books 1\u20133', 'Swing Shift'),
+            ('Swing Shift 1 to 3', 'Swing Shift'),
+            ('Swing Shift 1.5', 'Swing Shift'),
+            ('Super Sales on Super Heroes', 'Super Sales on Super Heroes 5'),
+            ('1984', '1984'),
+            ('Series 2020', 'Series'),
+            ('World War II', 'World War II'),
+            ('Series Book IV', 'Series'),
+        ]
+        for album, title in controls:
+            tool, _ = self._score(album, title)
+            self.assertEqual(tool.score_ordering(), 0,
+                             '%s / %s' % (album, title))
 
 
 if __name__ == '__main__':

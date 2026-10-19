@@ -1,0 +1,184 @@
+[
+  {
+    "id": "dd101000001",
+    "title": "Dungeon Diving 101",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personDive", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesDive", "title": "Dungeon Diving", "ordinal": "1",
+       "position": {"kind": "point", "status": "complete", "value": "1",
+                    "label": "1", "sortKey": 1,
+                    "spans": [{"start": 1, "end": 1}]}}
+    ]
+  },
+  {
+    "id": "dd102000001",
+    "title": "Dungeon Diving 102",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personDive", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesDive", "title": "Dungeon Diving", "ordinal": "2",
+       "position": {"kind": "point", "status": "complete", "value": "2",
+                    "label": "2", "sortKey": 2,
+                    "spans": [{"start": 2, "end": 2}]}}
+    ]
+  },
+  {
+    "id": "dd201000001",
+    "title": "Dungeon Diving 201",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personDive", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesDive", "title": "Dungeon Diving", "ordinal": "5",
+       "position": {"kind": "point", "status": "complete", "value": "5",
+                    "label": "5", "sortKey": 5,
+                    "spans": [{"start": 5, "end": 5}]}}
+    ]
+  },
+  {
+    "id": "vlPack000002",
+    "title": "The Valens Legacy Publisher's Pack 2",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personValens", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesValens", "title": "The Valens Legacy", "ordinal": "2",
+       "position": {"kind": "range", "status": "complete", "value": null,
+                    "label": "3-4", "sortKey": 3,
+                    "spans": [{"start": 3, "end": 4}]}}
+    ]
+  },
+  {
+    "id": "vlPack000003",
+    "title": "The Valens Legacy Publisher's Pack 3",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personValens", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesValens", "title": "The Valens Legacy", "ordinal": "3",
+       "position": {"kind": "range", "status": "complete", "value": null,
+                    "label": "5-6", "sortKey": 5,
+                    "spans": [{"start": 5, "end": 6}]}}
+    ]
+  },
+  {
+    "id": "mnGirl000002",
+    "title": "My Ninja Girl Volume 2",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personNinja", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesNinja", "title": "My Ninja Girl", "ordinal": "2",
+       "position": {"kind": "range", "status": "complete", "value": null,
+                    "label": "3-4", "sortKey": 3,
+                    "spans": [{"start": 3, "end": 4}]}}
+    ]
+  },
+  {
+    "id": "ssRange00001",
+    "title": "Swing Shift",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personArand", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesSwing", "title": "Swing Shift", "ordinal": null,
+       "position": {"kind": "range", "status": "complete", "value": null,
+                    "label": "1-3", "sortKey": 1,
+                    "spans": [{"start": 1, "end": 3}]}}
+    ]
+  },
+  {
+    "id": "ssMulti00001",
+    "title": "Swing Shift",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personArand", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesSwing", "title": "Swing Shift", "ordinal": "2",
+       "position": {"kind": "point", "status": "complete", "value": "2",
+                    "label": "2", "sortKey": 2,
+                    "spans": [{"start": 2, "end": 2}]}},
+      {"id": "seriesOther", "title": "Swing Shift", "ordinal": "9",
+       "position": {"kind": "point", "status": "complete", "value": "9",
+                    "label": "9", "sortKey": 9,
+                    "spans": [{"start": 9, "end": 9}]}}
+    ]
+  },
+  {
+    "id": "ssAbsent0001",
+    "title": "Swing Shift",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personArand", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesSwing", "title": "Swing Shift", "ordinal": null,
+       "position": {"kind": "unknown", "status": "absent", "value": null,
+                    "label": "", "sortKey": 5, "spans": []}}
+    ]
+  },
+  {
+    "id": "ssFrac000001",
+    "title": "Swing Shift",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personArand", "name": "Author Name"}}
+    ],
+    "seriesWithId": [
+      {"id": "seriesSwing", "title": "Swing Shift", "ordinal": null,
+       "position": {"kind": "point", "status": "complete", "value": "1.5",
+                    "label": "1.5", "sortKey": 1.5, "spans": []}}
+    ]
+  },
+  {
+    "id": "year19840001",
+    "title": "1984",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personOrwell", "name": "Author Name"}}
+    ],
+    "seriesWithId": []
+  },
+  {
+    "id": "year20200001",
+    "title": "Series",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personYear", "name": "Author Name"}}
+    ],
+    "seriesWithId": []
+  },
+  {
+    "id": "warTwo000001",
+    "title": "World War II",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {"role": {"name": "Author"}, "person": {"id": "personWar", "name": "Author Name"}}
+    ],
+    "seriesWithId": []
+  }
+]
