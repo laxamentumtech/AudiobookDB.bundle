@@ -13,6 +13,9 @@ VERSION_NO = version
 # Score required to short-circuit matching and stop searching.
 GOOD_SCORE = 98
 
+# Approximate character budget for a Fix Match result description.
+DESCRIPTION_LIMIT = 60
+
 # Setup logger
 log = Logging()
 
@@ -305,17 +308,26 @@ class AudiobookAlbum(Agent.Album):
             # Shorten artist
             artist_initials = search_helper.name_to_initials(
                 r.get('author') or '')
-            # Shorten narrator
-            narrator_initials = search_helper.name_to_initials(
-                r.get('narrator') or '')
-
-            description = '\"%s\" %s %s %s %s' % (
+            # Shorten the complete narrator list; when it does not fit,
+            # show the first names plus an explicit count.
+            description_prefix = '\"%s\" %s %s' % (
                 title_trunc,
                 local_separators['T_A'],
-                artist_initials,
-                local_separators['A_N'],
-                narrator_initials
+                artist_initials
             )
+            narrator_separator = ' %s ' % local_separators['A_N']
+            narrator_display = search_helper.format_narrators(
+                r.get('narrator') or [],
+                DESCRIPTION_LIMIT - len(description_prefix)
+                - len(narrator_separator)
+            )
+            if narrator_display:
+                description = description_prefix + narrator_separator \
+                    + narrator_display
+            else:
+                # Authors-only payload (the recorded book-search case):
+                # do not imply that release narrator credits are complete.
+                description = description_prefix
             results.Append(
                 MetadataSearchResult(
                     id=r['id'],

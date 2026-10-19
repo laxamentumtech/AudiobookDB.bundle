@@ -42,6 +42,39 @@ being removed from new PMS releases in 2026; this bundle requires it.
 | `simplify_title` | `false` | Simplify book titles (remove subtitle, series part, (un)abridged, etc.). |
 | `logging_level` | `WARN` | Level of plugin logging (`DEBUG`, `INFO`, `WARN`, `ERROR`). |
 
+## Narrators and tags
+
+Album updates read every `Narrator` credit from the selected release
+(`release.people`) and write one Style tag per distinct narrator name. The
+complete credit list is retained with each person's stable `person.id`; tags
+are display text only. Two different people who share a display name produce
+two credits but one Style tag, because Plex deduplicates identical tag text.
+A forced refresh clears and re-adds narrator styles from the current release
+detail, so a catalog rename is reflected on the next forced update.
+
+Fix Match shows every narrator entry present in a search hit. When the complete
+list does not fit the description budget, the names that fit are followed by an
+explicit `+N` remaining count; the full list stays in the result data.
+Book-level search hits (the recorded case) carry authors only; the agent does
+not claim narrator completeness or borrow narrators from another release.
+
+Clickable narrator profiles (portrait, bio, discography) are not available
+through the Plex legacy music model: an album exposes only the album artist,
+and music collections have no details page. The upstream prerequisite is a
+Plex model/client change that exposes additional, client-rendered per-album
+people; no plugin-side change closes that gap. Narrator discovery therefore
+stops at Style tags and Fix Match display.
+
+## Release selection
+
+Album updates select, in order: a release pinned in the stored ID, the release
+matched by an ASIN resolve, the only release on the book, or the
+lexicographically lowest release ID as a deterministic fallback. The fallback
+selects a recording; it does not verify that it is the user's edition. Accurate
+matches come from an ASIN in the filename or manual search field, or from an
+explicit `book.<id>.release.<id>` ID. Narrators are taken only from that
+selected release, never aggregated across releases.
+
 ## Quick match
 
 Put an ASIN in the manual search field (or in the media filename for albums)

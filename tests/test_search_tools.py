@@ -268,6 +268,20 @@ class TestCheckForAsinPeople(unittest.TestCase):
         self.assertTrue(tool.check_for_asin())
         self.assertEqual(tool.results.appended[0].id, 'person.ypMPwXzWXaiX')
 
+    def test_native_person_id_shows_disambiguation(self):
+        person = load_fixture('person_detail_ypMPwXzWXaiX.json')
+        person['disambiguation'] = 'Science fiction author'
+        install_transport({
+            BASE + '/people/ypMPwXzWXaiX': (200, api_body(person)),
+        })
+        tool = make('authors', FakeMedia(artist='person.ypMPwXzWXaiX'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended[0].id,
+                         'person.ypMPwXzWXaiX')
+        self.assertEqual(tool.results.appended[0].name,
+                         'Andy Weir (Science fiction author)')
+
     def test_native_person_id_404(self):
         install_transport({})
         tool = make('authors', FakeMedia(artist='person.ypMPwXzWXaiX'),
@@ -388,7 +402,8 @@ class TestAlbumParseApiResponse(unittest.TestCase):
         self.assertEqual(len(results), 10)
         self.assertEqual(results[1]['book_id'], 'book.WQQDcMBQ3qUT')
         self.assertEqual(results[1]['title'], 'The Martian')
-        self.assertEqual(results[1]['author'], [{'name': 'Andy Weir'}])
+        self.assertEqual(results[1]['author'], [
+            {'id': 'ypMPwXzWXaiX', 'name': 'Andy Weir'}])
         self.assertEqual(results[1]['narrator'], [])
         self.assertIsNone(results[1]['date'])
         self.assertEqual(results[1]['language'], 'English')
@@ -414,7 +429,8 @@ class TestAlbumParseApiResponse(unittest.TestCase):
                 {'role': {'name': 'Narrator'},
                  'person': {'id': 'p1', 'name': 'N N'}}]},
         ])
-        self.assertEqual(results[0]['narrator'], [{'name': 'N N'}])
+        self.assertEqual(results[0]['narrator'], [
+            {'id': 'p1', 'name': 'N N'}])
 
 
 class TestPreSearchLogging(unittest.TestCase):
@@ -506,6 +522,15 @@ class TestArtistParseApiResponse(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['id'], 'person.ypMPwXzWXaiX')
         self.assertEqual(results[0]['name'], 'Andy Weir')
+        self.assertIsNone(results[0]['disambiguation'])
+
+    def test_disambiguation_parsed(self):
+        tool = make_artist(FakeMedia())
+        results = tool.parse_api_response([
+            {'id': 'p1', 'name': 'Alex Smith',
+             'disambiguation': 'Narrator'},
+        ])
+        self.assertEqual(results[0]['disambiguation'], 'Narrator')
 
     def test_missing_keys_rejected(self):
         tool = make_artist(FakeMedia())
@@ -549,6 +574,17 @@ class TestScoreTool(unittest.TestCase):
         self.assertEqual(info[0]['author'], 'Andy Weir')
         self.assertEqual(info[0]['score'], 100)
 
+    def test_run_score_author_disambiguation_is_display_only(self):
+        media = FakeMedia(artist='Alex Smith')
+        tool, info = self._score(
+            {'id': 'person.p1', 'name': 'Alex Smith',
+             'disambiguation': 'Narrator'},
+            media=media)
+        tool.run_score_author()
+        # The hint is visible, but scoring still compares the bare name.
+        self.assertEqual(info[0]['author'], 'Alex Smith (Narrator)')
+        self.assertEqual(info[0]['score'], 100)
+
     def test_run_score_book_perfect_match(self):
         media = FakeMedia(album='The Martian', artist='Andy Weir')
         result = {
@@ -564,11 +600,29 @@ class TestScoreTool(unittest.TestCase):
         self.assertEqual(len(info), 1)
         self.assertEqual(info[0]['id'], 'book.WQQDcMBQ3qUT')
         self.assertEqual(info[0]['score'], 100)
-        self.assertEqual(info[0]['narrator'], 'R. C. Bray')
+        self.assertEqual(info[0]['narrator'], ['R. C. Bray'])
         self.assertEqual(info[0]['title'], 'The Martian')
         self.assertEqual(info[0]['year'], 2011)
         self.assertNotIn('date', info[0])
         self.assertNotIn('region', info[0])
+
+    def test_run_score_book_keeps_complete_narrator_list(self):
+        media = FakeMedia(album='The Martian', artist='Andy Weir')
+        result = {
+            'book_id': 'book.WQQDcMBQ3qUT',
+            'author': [{'id': 'a1', 'name': 'Andy Weir'}],
+            'date': None,
+            'language': 'English',
+            'narrator': [
+                {'id': 'n1', 'name': 'Wil Wheaton'},
+                {'id': 'n2', 'name': 'R.C. Bray'},
+            ],
+            'title': 'The Martian',
+        }
+        tool, info = self._score(result, media=media)
+        tool.run_score_book()
+        self.assertEqual(info[0]['narrator'],
+                         ['Wil Wheaton', 'R.C. Bray'])
 
     def test_run_score_book_empty_people(self):
         media = FakeMedia(album='The Martian')

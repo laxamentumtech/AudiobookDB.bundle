@@ -259,6 +259,43 @@ class TestAlbumSearch(unittest.TestCase):
         self.assertIn('The Martian', r.name)
         self.assertIn('A.Weir', r.name)
 
+    def test_search_compacts_multiple_narrators_with_count(self):
+        hits = [{
+            'id': 'aaaaaaaaaaaa',
+            'title': 'The Martian',
+            'people': [
+                {'role': {'name': 'Author'},
+                 'person': {'id': 'p1', 'name': 'Andy Weir'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n1', 'name': 'Wil Wheaton'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n2', 'name': 'R.C. Bray'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n3', 'name': 'Scott Brick'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n4', 'name': 'Kate Reading'}},
+            ],
+            'originalLanguage': 'English',
+        }]
+        appended = self._search(hits, manual=True)
+        self.assertEqual(len(appended), 1)
+        name = appended[0].name
+        # The display never silently drops narrators: the names that fit
+        # are followed by the explicit remaining count.
+        self.assertIn('W.Wheaton', name)
+        self.assertIn('R.C.Bray', name)
+        self.assertIn('+1', name)
+
+    def test_authors_only_hit_has_no_narrator_separator(self):
+        install_transport(load_fixture('search_books_martian.json'))
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(), plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(len(results.appended), 1)
+        self.assertEqual(results.appended[0].name,
+                         '"The Martian" by A.Weir')
+
     def test_search_posts_search_body(self):
         install_transport(load_fixture('search_books_martian.json'))
         results = _Results()
@@ -474,6 +511,33 @@ class TestAlbumUpdate(unittest.TestCase):
 
 class TestArtistSearchAndUpdate(unittest.TestCase):
     """New-behavior check 4: person migration + search round trip."""
+
+    def test_same_name_people_stay_distinct_with_disambiguation(self):
+        hits = [
+            {'id': 'p1', 'name': 'Alex Smith',
+             'disambiguation': 'Narrator'},
+            {'id': 'p2', 'name': 'Alex Smith',
+             'disambiguation': 'Author'},
+        ]
+        install_transport(hits)
+        results = _Results()
+        agent.AudiobookArtist().search(
+            results, artist_media(artist='Alex Smith'),
+            plex_shim.Locale.Language.English, True)
+        self.assertEqual([r.id for r in results.appended],
+                         ['person.p1', 'person.p2'])
+        self.assertEqual(results.appended[0].name,
+                         'Alex Smith (Narrator)')
+        self.assertEqual(results.appended[1].name,
+                         'Alex Smith (Author)')
+
+    def test_person_without_disambiguation_shows_bare_name(self):
+        install_transport([{'id': 'p1', 'name': 'Alex Smith'}])
+        results = _Results()
+        agent.AudiobookArtist().search(
+            results, artist_media(artist='Alex Smith'),
+            plex_shim.Locale.Language.English, True)
+        self.assertEqual(results.appended[0].name, 'Alex Smith')
 
     def test_empty_artist_search_noop(self):
         # None and '' artist values short-circuit: the search completes

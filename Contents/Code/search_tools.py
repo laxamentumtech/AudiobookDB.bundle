@@ -4,6 +4,7 @@ import re
 from logging import Logging
 import api_client
 import metadata_ids
+from credits import collect_role_credits
 
 # Setup logger
 log = Logging()
@@ -155,6 +156,16 @@ class SearchTool:
             return appended
         return self.append_person_detail(hits[0]['id'], asin)
 
+    def person_display_name(self, person):
+        """
+            Appends the catalog disambiguation hint to a person's display
+            name. The hint is display-only; result identity stays person.id.
+        """
+        name = person.get('name')
+        if person.get('disambiguation'):
+            return '%s (%s)' % (name, person['disambiguation'])
+        return name
+
     def append_person_detail(self, person_id, asin=None):
         """
             Fetches a person detail, optionally confirming the Audible
@@ -179,7 +190,7 @@ class SearchTool:
             MetadataSearchResult(
                 id=metadata_ids.serialize_person_id(person['id']),
                 lang=self.lang,
-                name=person.get('name'),
+                name=self.person_display_name(person),
                 score=100,
                 year=None,
             )
@@ -199,7 +210,7 @@ class SearchTool:
             MetadataSearchResult(
                 id=metadata_ids.serialize_person_id(person['id']),
                 lang=self.lang,
-                name=person.get('name'),
+                name=self.person_display_name(person),
                 score=100,
                 year=None,
             )
@@ -263,6 +274,33 @@ class AlbumSearchTool(SearchTool):
         if 'q' not in body and not filters:
             return None
         return body
+
+    def format_narrators(self, names, limit):
+        """
+            Formats the complete narrator list for the Fix Match line.
+
+            Names are converted to initials and joined while they fit in
+            ``limit`` characters. When the list does not fit, the first
+            names are shown with an explicit ``+N`` count so no narrator
+            silently disappears. A single name is never truncated; the
+            complete list stays in the result data.
+        """
+        initials = [
+            self.name_to_initials(name) for name in names if name
+        ]
+        if not initials:
+            return ''
+        full = ', '.join(initials)
+        if len(full) <= limit:
+            return full
+        if len(initials) == 1:
+            return full
+        for count in range(len(initials) - 1, 0, -1):
+            candidate = ', '.join(initials[:count]) + ' +%d' % (
+                len(initials) - count)
+            if len(candidate) <= limit:
+                return candidate
+        return initials[0] + ' +%d' % (len(initials) - 1)
 
     def name_to_initials(self, input_name):
         """
@@ -341,16 +379,12 @@ class AlbumSearchTool(SearchTool):
             # Only append results which have valid keys
             if isinstance(item, dict) and \
                     set(item.keys()) >= {'id', 'title', 'people'}:
-                authors = [
-                    {'name': p['person']['name']}
-                    for p in item.get('people') or []
-                    if (p.get('role') or {}).get('name') == 'Author'
-                ]
-                narrator = []
-                for p in item.get('people') or []:
-                    if (p.get('role') or {}).get('name') == 'Narrator':
-                        narrator = [{'name': p['person']['name']}]
-                        break
+                authors = collect_role_credits(
+                    item.get('people'), 'book', item['id'], 'Author')
+                # A book-search payload is not a release-credit source, but
+                # when it does carry Narrator entries keep all of them.
+                narrator = collect_role_credits(
+                    item.get('people'), 'book', item['id'], 'Narrator')
                 search_results.append(
                     {
                         'book_id': metadata_ids.serialize_book_id(
@@ -531,6 +565,7 @@ class ArtistSearchTool(SearchTool):
                         'id': metadata_ids.serialize_person_id(item['id']),
                         'name': item['name'],
                         'description': item.get('description'),
+                        'disambiguation': item.get('disambiguation'),
                         'genres': item.get('genres'),
                     }
                 )
@@ -563,6 +598,7 @@ class ScoreTool:
         year=None
     ):
         self.calculate_score = levenshtein_distance
+        self.disambiguation = None
         self.helper = helper
         self.index = index
         self.info = info
@@ -591,6 +627,7 @@ class ScoreTool:
         self.author = self.result_dict['name']
         self.authors_concat = self.author
         self.date = None
+        self.disambiguation = self.result_dict.get('disambiguation')
         self.language = None
         self.narrator = None
         self.title = None
@@ -607,9 +644,11 @@ class ScoreTool:
         ) if authors else ''
         self.author = authors[0]['name'] if authors else ''
         self.date = self.result_dict['date']
+        self.disambiguation = None
         self.language = (self.result_dict['language'] or '').title()
+        # Keep the complete narrator list: the display compacts it later.
         narrators = self.result_dict['narrator']
-        self.narrator = narrators[0]['name'] if narrators else ''
+        self.narrator = [n['name'] for n in narrators] if narrators else []
         self.title = self.result_dict['title']
         return self.score_result()
 
@@ -635,8 +674,11 @@ class ScoreTool:
             plex_score_dict['id'] = self.asin
             data_to_log.append({'ID is': self.asin})
         if self.author:
-            plex_score_dict['author'] = self.author
-            data_to_log.append({'Author is': self.author})
+            author = self.author
+            if self.disambiguation:
+                author = '%s (%s)' % (self.author, self.disambiguation)
+            plex_score_dict['author'] = author
+            data_to_log.append({'Author is': author})
         if self.date:
             plex_score_dict['date'] = self.date
             data_to_log.append({'Date is': self.date})
