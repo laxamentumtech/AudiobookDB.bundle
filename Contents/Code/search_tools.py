@@ -35,8 +35,11 @@ class SearchTool:
             the result(s) itself and returns True when the caller must
             stop the normal search, False to continue.
         """
-        # Check filename for ASIN if content type is books
-        if self.media.filename and self.content_type == 'books':
+        # Check filename for ASIN if content type is books. A manual
+        # (Fix Match) query takes precedence over the scanner's filename
+        # hint, so the user can correct a wrong filename ASIN.
+        if self.media.filename and self.content_type == 'books' \
+                and not self.manual:
             try:
                 # Provide a plain filename for ASIN search
                 filename_unquoted = url_parse.unquote(self.media.filename)
@@ -252,7 +255,8 @@ class AlbumSearchTool(SearchTool):
         # Fix match/manual search doesn't provide author
         if self.media.artist:
             filters['person'] = self.media.artist
-        if self.normalizedName and len(self.normalizedName) >= 3:
+        if self.normalizedName \
+                and len(self.normalizedName) >= api_client.MIN_QUERY_LENGTH:
             body['q'] = self.normalizedName
         if filters:
             body['filters'] = filters
@@ -412,7 +416,7 @@ class ArtistSearchTool(SearchTool):
         """
         modified_artist_name = self.cleanup_author_name(self.media.artist)
         if not modified_artist_name \
-                or len(modified_artist_name) < 3:
+                or len(modified_artist_name) < api_client.MIN_QUERY_LENGTH:
             return None
         return {'q': modified_artist_name, 'type': 'people'}
 

@@ -60,8 +60,10 @@ search:
 Once a library is switched to this agent, its old pinned IDs (`ASIN` /
 `ASIN_region`) keep working: on the next refresh the agent resolves the ASIN
 against AudiobookDB, populates metadata, and rewrites the pinned ID to the new
-native form (`book.<id>.release.<id>` / `person.<id>`). If an ASIN is not in
-the AudiobookDB catalog, the item is left untouched and the failure is reported
-in the log — add the external link to AudiobookDB and retry.
+native form (`book.<id>.release.<id>` / `person.<id>`). Two cases are left
+untouched and reported in the log: an ASIN not in the AudiobookDB catalog
+(add the external link to AudiobookDB and retry), and an artist ASIN that
+resolves to multiple people (use Fix Match — or enter the person ID
+manually — to disambiguate before the ID can be rewritten).
 
 Metadata by [AudiobookDB](https://audiobookdb.org)

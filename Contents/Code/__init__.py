@@ -25,7 +25,8 @@ def Start():
     HTTP.ClearCache()
     HTTP.CacheTime = CACHE_1WEEK
     HTTP.Headers['User-agent'] = api_client.USER_AGENT
-    HTTP.Headers['X-API-Key'] = Prefs['api_key'] or 'anonymous'
+    # The API key is attached per-request to the trusted API origin only
+    # (see api_client); it must not ride along on off-origin image fetches.
     HTTP.Headers['Accept-Encoding'] = 'gzip'
     log.separator(
         msg=(
@@ -198,9 +199,14 @@ class AudiobookArtist(Agent.Artist):
         # Kept here because of Proxy
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
-                helper.metadata.posters[helper.thumb] = Proxy.Media(
-                    api_client.fetch_bytes(helper.thumb), sort_order=0
-                )
+                try:
+                    helper.metadata.posters[helper.thumb] = Proxy.Media(
+                        api_client.fetch_bytes(helper.thumb), sort_order=0
+                    )
+                except (IOError, OSError) as e:
+                    # A poster failure must not abort the update: log it
+                    # and continue without the poster.
+                    log.warn('Skipping poster: %s', e)
 
         # Commit the native person ID last (after every setter succeeded),
         # so a failed setter leaves the old ID in place.
@@ -272,9 +278,14 @@ class AudiobookAlbum(Agent.Album):
             Locale.Language.English: {'T_A': 'by', 'A_N': 'w/'},
             'de': {'T_A': 'von', 'A_N': 'mit'},
             'fr': {'T_A': 'de', 'A_N': 'ac'},
-            'it': {'T_A': 'di', 'A_N': 'con'}
+            'it': {'T_A': 'di', 'A_N': 'con'},
+            'es': {'T_A': 'de', 'A_N': 'con'},
+            'ja': {'T_A': 'による', 'A_N': '読み'},
         }
-        local_separators = separator_dict[lang]
+        # Languages the agent advertises without localized separators fall
+        # back to the English wording.
+        local_separators = separator_dict.get(
+            lang, separator_dict[Locale.Language.English])
         log.debug(
             'Using localized separators "%s" and "%s"',
             local_separators['T_A'],
@@ -416,11 +427,16 @@ class AudiobookAlbum(Agent.Album):
         # Kept here because of Proxy
         if helper.thumb:
             if helper.thumb not in helper.metadata.posters or helper.force:
-                helper.metadata.posters[helper.thumb] = Proxy.Media(
-                    api_client.fetch_bytes(helper.thumb), sort_order=0
-                )
-                # Re-prioritize the poster to the first position
-                helper.metadata.posters.validate_keys([helper.thumb])
+                try:
+                    helper.metadata.posters[helper.thumb] = Proxy.Media(
+                        api_client.fetch_bytes(helper.thumb), sort_order=0
+                    )
+                    # Re-prioritize the poster to the first position
+                    helper.metadata.posters.validate_keys([helper.thumb])
+                except (IOError, OSError) as e:
+                    # A poster failure must not abort the update: log it
+                    # and continue without the poster.
+                    log.warn('Skipping poster: %s', e)
         # Rating.
         helper.set_metadata_rating()
 

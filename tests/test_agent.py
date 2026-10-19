@@ -98,7 +98,6 @@ def install_transport(search_hits, mapping=None, thumb_body=b'JPEGDATA'):
 
     HTTP.Reset()
     HTTP.Headers = {}
-    HTTP.Headers['X-API-Key'] = 'anonymous'
     HTTP.transport = transport
     return transport
 
@@ -161,14 +160,18 @@ class TestStartAndIdentity(unittest.TestCase):
         _prefs()
         agent.Start()
         self.assertEqual(HTTP.Headers['User-agent'], api_client.USER_AGENT)
-        self.assertEqual(HTTP.Headers['X-API-Key'], 'anonymous')
+        # The API key is attached per-request to the API origin only; it
+        # must not be a global default that rides along on image fetches.
+        self.assertNotIn('X-API-Key', HTTP.Headers)
         self.assertEqual(HTTP.CacheTime, CACHE_1WEEK)
 
     def test_start_uses_pref_key(self):
         _prefs()
         Prefs['api_key'] = 'test-key'
         agent.Start()
-        self.assertEqual(HTTP.Headers['X-API-Key'], 'test-key')
+        # No global header: the pref key travels with api_client calls.
+        self.assertNotIn('X-API-Key', HTTP.Headers)
+        self.assertEqual(api_client.api_key(), 'test-key')
         Prefs['api_key'] = ''
 
     def test_agent_names(self):
@@ -471,6 +474,18 @@ class TestAlbumUpdate(unittest.TestCase):
 
 class TestArtistSearchAndUpdate(unittest.TestCase):
     """New-behavior check 4: person migration + search round trip."""
+
+    def test_empty_artist_search_noop(self):
+        # None and '' artist values short-circuit: the search completes
+        # without exception, appends nothing, and makes no API request.
+        for artist in (None, ''):
+            install_transport(load_fixture('search_people_andy_weir.json'))
+            results = _Results()
+            agent.AudiobookArtist().search(
+                results, artist_media(artist=artist),
+                plex_shim.Locale.Language.English, False)
+            self.assertEqual(results.appended, [])
+            self.assertEqual(HTTP.requests, [])
 
     def test_legacy_asin_migration(self):
         install_transport(None)

@@ -45,7 +45,6 @@ def install_transport(mapping, default=''):
         return _HTTPRequest(status, body)
     plex_shim.HTTP.Reset()
     plex_shim.HTTP.Headers = {}
-    plex_shim.HTTP.Headers['X-API-Key'] = 'anonymous'
     plex_shim.HTTP.transport = transport
     Prefs['logging_level'] = 'ERROR'
     return transport
@@ -169,6 +168,23 @@ class TestCheckForAsinBooks(unittest.TestCase):
         self.assertFalse(tool.check_for_asin())
         self.assertEqual(tool.results.appended, [])
 
+    def test_manual_query_beats_filename_asin(self):
+        # A manual (Fix Match) query takes precedence over the scanner's
+        # filename hint: the filename ASIN is neither resolved nor
+        # quick-matched, and no API request is made for it.
+        install_transport({
+            BASE + '/audiobooks/external/audible/B00B5HZGUG':
+                (200, api_body(load_fixture(
+                    'book_external_resolve_B00B5HZGUG.json'))),
+        })
+        tool = make('books', FakeMedia(
+            filename='the%20martian%20B00B5HZGUG', album='The Martian'),
+            manual=True)
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        # The manual query 'The Martian' carries no ID: nothing requested.
+        self.assertEqual(HTTP.requests, [])
+
     def test_no_id_returns_false(self):
         install_transport({})
         tool = make('books', FakeMedia(album='The Martian'))
@@ -215,6 +231,32 @@ class TestCheckForAsinPeople(unittest.TestCase):
         tool = make('authors', FakeMedia(artist='Nobody B000000000'),
                     manual=True)
         self.assertFalse(tool.check_for_asin())
+
+    def test_multi_hit_only_confirmed_detail_appended(self):
+        # Two candidates share the ASIN in the resolve listing; only the
+        # detail that confirms the queried Audible ASIN is appended.
+        hits = load_fixture('person_external_resolve_B00G0WYW92.json')
+        hit2 = dict(hits[0])
+        hit2['id'] = 'otherPerson123'
+        hit2['name'] = 'Other Person'
+        # The unconfirmed detail: no Audible external entry.
+        unconfirmed = load_fixture('person_detail_ypMPwXzWXaiX.json')
+        del unconfirmed['external']
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2': (
+                200, api_body(hits + [hit2])),
+            BASE + '/people/ypMPwXzWXaiX': (
+                200, api_body(load_fixture('person_detail_ypMPwXzWXaiX.json'))),
+            BASE + '/people/otherPerson123': (
+                200, api_body(unconfirmed)),
+        })
+        tool = make('authors', FakeMedia(artist='Andy Weir B00G0WYW92'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(len(tool.results.appended), 1)
+        r = tool.results.appended[0]
+        self.assertEqual(r.id, 'person.ypMPwXzWXaiX')
+        self.assertEqual(r.name, 'Andy Weir')
 
     def test_native_person_id(self):
         install_transport({

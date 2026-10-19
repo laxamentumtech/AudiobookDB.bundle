@@ -46,7 +46,10 @@ class Logging:
         """
             Logs key/value pair with passed log level.
         """
-        output = "{key:<20}{val}".format(
+        # The template is unicode: on py2 a byte-string template raises
+        # UnicodeEncodeError for non-ASCII catalog text (json.loads returns
+        # unicode).
+        output = u"{key:<20}{val}".format(
             key=key,
             val=val
         )

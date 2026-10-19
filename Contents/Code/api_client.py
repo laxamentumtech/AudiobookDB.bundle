@@ -1,5 +1,19 @@
+# -*- coding: utf-8 -*-
 import json
 from time import sleep
+import time as time_mod
+
+try:
+    import urllib.parse as url_parse
+except ImportError:  # pragma: no cover - python 2
+    import urlparse as url_parse
+
+try:
+    from email.utils import parsedate_tz as parse_date_tz
+except ImportError:  # pragma: no cover - very old py2 stdlib
+    parse_date_tz = None
+
+import calendar
 
 from logging import Logging
 from _version import version
@@ -22,6 +36,28 @@ MAX_ATTEMPTS = 4
 DEFAULT_RETRY_AFTER = 1
 # Server-supplied Retry-After values are clamped to this upper bound.
 MAX_RETRY_AFTER = 60
+# Shortest free-text query the API accepts; the search builders and
+# search() share this threshold so they cannot drift.
+MIN_QUERY_LENGTH = 3
+
+# Image fetches (fetch_bytes) are restricted to HTTPS on these hosts — the
+# catalog's image CDN. URLs from the API are data, not instructions: anything
+# else (http://, other hosts) is refused before the request is made.
+ALLOWED_IMAGE_HOSTS = ('cdn.audiobookdb.org',)
+
+
+def trusted_image_url(url):
+    """
+        True when the URL is HTTPS on an allowed image host. Unparseable
+        URLs (None, bytes on py3, malformed) are rejected: urlparse raises
+        for them and the exception is swallowed here.
+    """
+    try:
+        parts = url_parse.urlparse(url)
+    except (AttributeError, ValueError, TypeError):
+        return False
+    return parts.scheme == 'https' and \
+        parts.netloc.lower() in ALLOWED_IMAGE_HOSTS
 
 
 def decode(body):
@@ -44,14 +80,61 @@ def decode(body):
     return data
 
 
+def retry_after_seconds(response):
+    """
+        Reads the Retry-After header in both valid forms — a delay-seconds
+        integer and an HTTP-date (RFC 9110) — and returns how many seconds to
+        wait, clamped to [0, MAX_RETRY_AFTER]. For an HTTP-date the delay is
+        the time until that date (epoch - now), so a future date yields the
+        server's requested interval. Negative or unparseable values fall back
+        to DEFAULT_RETRY_AFTER.
+    """
+    try:
+        headers_map = response.headers or {}
+    except AttributeError:
+        headers_map = {}
+    raw = None
+    for key in ('retry-after', 'Retry-After', 'RETRY-AFTER'):
+        if key in headers_map:
+            raw = headers_map[key]
+            break
+    if raw is None:
+        return DEFAULT_RETRY_AFTER
+    text = str(raw).strip()
+    delay = None
+    try:
+        delay = int(text)
+    except (ValueError, TypeError):
+        # Second form: an HTTP-date, e.g. "Fri, 24 Oct 2026 08:12:00 GMT".
+        if parse_date_tz is not None:
+            try:
+                parsed = parse_date_tz(text)
+            except (TypeError, ValueError):
+                parsed = None
+            if parsed is not None:
+                # parsed[0:9] is the (year..daylight) time tuple in GMT
+                # (parsedate_tz normalizes the zone into the seconds);
+                # timegm reads it as UTC, DST-safe.
+                epoch = int(calendar.timegm(parsed[0:9])
+                            - (parsed[9] or 0))
+                delay = epoch - int(time_mod.time())
+    if delay is None or delay < 0:
+        delay = DEFAULT_RETRY_AFTER
+    if delay > MAX_RETRY_AFTER:
+        delay = MAX_RETRY_AFTER
+    return delay
+
+
 def request_with_retries(url, method=None, headers=None, data=None):
     """
         Makes an HTTP call, retrying on failure.
 
         A 429 sleeps Retry-After (default 1) seconds before the next attempt;
-        any other non-2xx status or transport error also retries. Returns the
-        response (str()-able body plus .status/.headers) on the first 2xx, or
-        None once MAX_ATTEMPTS is exhausted.
+        any other non-2xx status or transport error also retries. Successful
+        responses carry no added delay, and no sleep is performed after the
+        final attempt. Returns the response (str()-able body plus
+        .status/.headers) on the first 2xx, or None once MAX_ATTEMPTS is
+        exhausted.
     """
     response = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -59,14 +142,15 @@ def request_with_retries(url, method=None, headers=None, data=None):
         try:
             response = HTTP.Request(
                 url, method=method, headers=headers or {}, data=data,
-                timeout=90, sleep=DEFAULT_RETRY_AFTER
+                timeout=90
             )
         except Exception:
             log.error('API request failed (attempt %d): %s' % (attempt, url))
             response = None
 
         if response is None:
-            sleep(DEFAULT_RETRY_AFTER)
+            if attempt < MAX_ATTEMPTS:
+                sleep(DEFAULT_RETRY_AFTER)
             continue
 
         try:
@@ -77,30 +161,15 @@ def request_with_retries(url, method=None, headers=None, data=None):
             return response
 
         if status == 429:
-            try:
-                headers_map = response.headers or {}
-            except AttributeError:
-                headers_map = {}
-            retry_after = DEFAULT_RETRY_AFTER
-            for key in ('retry-after', 'Retry-After', 'RETRY-AFTER'):
-                if key in headers_map:
-                    try:
-                        retry_after = int(headers_map[key])
-                    except (ValueError, TypeError):
-                        retry_after = DEFAULT_RETRY_AFTER
-                    # Clamp: a hostile/buggy value must not abort the
-                    # request (negative) or block the UI (oversized).
-                    if retry_after < 0:
-                        retry_after = DEFAULT_RETRY_AFTER
-                    if retry_after > MAX_RETRY_AFTER:
-                        retry_after = MAX_RETRY_AFTER
+            retry_after = retry_after_seconds(response)
             log.warn('API rate limited, retrying in %d seconds: %s' % (
                 retry_after, url))
-            sleep(retry_after)
         else:
             log.error('API status %s (attempt %d): %s' % (
                 status, attempt, url))
-            sleep(DEFAULT_RETRY_AFTER)
+            retry_after = DEFAULT_RETRY_AFTER
+        if attempt < MAX_ATTEMPTS:
+            sleep(retry_after)
 
     return None
 
@@ -109,31 +178,108 @@ def make_request(url):
     """
         GETs a URL and returns the decoded JSON object, or None on any
         failure (non-2xx, malformed JSON, JSON:API error envelope).
+
+        The API key is attached per-request — only this and post_json()
+        ever send it, and only to the trusted API origin.
     """
-    response = request_with_retries(url)
+    response = request_with_retries(
+        url, headers={'X-API-Key': api_key()})
     if response is None:
         return None
     return decode(str(response))
 
 
+# Image redirects are followed by fetch_bytes() hop by hop, with the
+# allowlist re-checked at every hop; a 3xx chain longer than this many
+# hops is rejected outright.
+MAX_IMAGE_REDIRECTS = 3
+
+
+def location_header(response):
+    """
+        Returns the response's Location header value (case-insensitive
+        keys), or None when absent.
+    """
+    try:
+        headers_map = response.headers or {}
+    except AttributeError:
+        headers_map = {}
+    for key in ('location', 'Location', 'LOCATION'):
+        if headers_map.get(key):
+            return headers_map[key]
+    return None
+
+
 def fetch_bytes(url):
     """
         GETs a URL and returns the raw response body (bytes), for images.
-        Raises IOError once attempts are exhausted.
+
+        The URL comes from catalog data, so it is validated first: only HTTPS
+        URLs on the trusted image hosts (ALLOWED_IMAGE_HOSTS) are fetched.
+        3xx responses are followed hop by hop here (not by the transport):
+        every Location is resolved against the current URL and re-checked
+        against the allowlist, and chains longer than MAX_IMAGE_REDIRECTS
+        hops are rejected. Raises IOError for an untrusted URL, a redirect
+        to an untrusted URL, a redirect loop, or a non-2xx response.
+
+        Residual platform limitation: Plex's HTTP.Request has no option to
+        disable redirect following, and on some transports the 3xx hop is
+        consumed inside the transport — the final 2xx then arrives without a
+        Location header, so the hop-by-hop check cannot see that redirect.
+        The initial URL is always pre-validated, and any redirect the
+        transport surfaces is enforced here.
     """
-    response = request_with_retries(url)
-    if response is None:
-        raise IOError('Failed to fetch: ' + url)
-    # str() yields the raw body: py2 bytes (images) must stay bytes;
-    # a py3 str body is re-encoded. Never UTF-8-encode image bytes.
-    body = str(response)
-    try:
-        text_type = unicode
-    except NameError:
-        text_type = str
-    if isinstance(body, text_type):
-        body = body.encode('utf-8')
-    return body
+    if not trusted_image_url(url):
+        raise IOError('Untrusted image URL: ' + str(url))
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        hops = 0
+        while True:
+            response = None
+            try:
+                response = HTTP.Request(
+                    url, method='GET', headers={}, timeout=90
+                )
+            except Exception:
+                log.error('Image request failed (attempt %d): %s'
+                          % (attempt, url))
+                response = None
+            if response is None:
+                break
+            try:
+                status = response.status
+            except AttributeError:
+                status = 200
+            if 200 <= status < 300:
+                # str() yields the raw body: py2 bytes (images) must stay
+                # bytes; a py3 str body is re-encoded. Never UTF-8-encode
+                # image bytes.
+                body = str(response)
+                try:
+                    text_type = unicode
+                except NameError:
+                    text_type = str
+                if isinstance(body, text_type):
+                    body = body.encode('utf-8')
+                return body
+            if 300 <= status < 400:
+                if hops >= MAX_IMAGE_REDIRECTS:
+                    raise IOError('Too many redirects: ' + str(url))
+                target = location_header(response)
+                if not target:
+                    raise IOError('Redirect without Location: ' + url)
+                target = url_parse.urljoin(url, str(target))
+                if not trusted_image_url(target):
+                    raise IOError('Redirect to untrusted image URL: '
+                                  + target)
+                url = target
+                hops += 1
+                continue
+            log.error('Image status %s (attempt %d): %s'
+                      % (status, attempt, url))
+            break
+        if attempt < MAX_ATTEMPTS:
+            sleep(DEFAULT_RETRY_AFTER)
+    raise IOError('Failed to fetch: ' + url)
 
 
 def post_json(path, body):
@@ -158,14 +304,17 @@ def post_json(path, body):
 
 def api_key():
     """
-        Reads the API key from the transport headers (Start() installs
-        Prefs['api_key'] or 'anonymous' there).
+        Reads the API key from Prefs['api_key'] ('anonymous' when unset).
+
+        The key is attached per-request to calls on the trusted API origin
+        only; it is never a global HTTP.Headers default, so image downloads
+        and off-origin requests never see it.
     """
     try:
-        headers = HTTP.Headers or {}
-    except AttributeError:
-        headers = {}
-    return headers.get('X-API-Key', 'anonymous')
+        key = Prefs['api_key']
+    except (AttributeError, KeyError):
+        return 'anonymous'
+    return key or 'anonymous'
 
 
 def resolve_asin_book(asin):
@@ -233,7 +382,7 @@ def search(q, type_, filters=None):
     """
     body = {'type': type_}
     if q:
-        if len(q) < 3 and not filters:
+        if len(q) < MIN_QUERY_LENGTH and not filters:
             # The API 400s on short q; skip the request entirely.
             return []
         body['q'] = q

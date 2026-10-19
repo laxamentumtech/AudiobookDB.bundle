@@ -45,7 +45,6 @@ def install_transport(mapping, default=''):
         return _HTTPRequest(status, body)
     plex_shim.HTTP.Reset()
     plex_shim.HTTP.Headers = {}
-    plex_shim.HTTP.Headers['X-API-Key'] = 'anonymous'
     plex_shim.HTTP.transport = transport
     Prefs['logging_level'] = 'ERROR'
     return transport
@@ -157,6 +156,25 @@ class TestAlbumResolveLegacyAsin(unittest.TestCase):
             api_client.MAX_ATTEMPTS)
         self.assertEqual(tool.native_release_id, None)
 
+    def test_selected_release_404_work_only(self):
+        # The resolve's matched release detail 404s: fall back to the
+        # work-only path (work-level metadata only, no release committed)
+        # rather than pinning a composite ID that would fail closed.
+        transport = dict(self._transport())
+        del transport[BASE + '/releases/dPL9fC7YnK8X']
+        install_transport(transport)
+        tool = make_album('B00B5HZGUG_us')
+        self.assertTrue(tool.resolve_item())
+        self.assertEqual(tool.native_book_id, 'WQQDcMBQ3qUT')
+        self.assertIsNone(tool.native_release_id)
+        # Work-level metadata was populated from the book detail.
+        self.assertEqual(tool.title, 'The Martian')
+        self.assertEqual(tool.author, [{'name': 'Andy Weir'}])
+        # Release-only fields stay empty: no studio, date, or narrator.
+        self.assertEqual(tool.studio, '')
+        self.assertIsNone(tool.date)
+        self.assertEqual(tool.narrator, [])
+
 
 class TestAlbumResolveNative(unittest.TestCase):
     def _transport(self):
@@ -261,6 +279,31 @@ class TestAlbumParseApiResponse(unittest.TestCase):
         tool = make_album()
         tool.parse_api_response(book, None)
         self.assertIsNone(tool.rating)
+
+    def test_null_person_names_filtered(self):
+        # Person entries with an absent/null person, or an empty name, must
+        # be dropped: downstream tagging calls re.match()/.strip() on the
+        # name and would raise before the native ID commits.
+        book = load_fixture(BOOK_DETAIL)
+        release = load_fixture(RELEASE_DETAIL)
+        book['people'] = [
+            {'role': {'name': 'Author'},
+             'person': {'id': 'ypMPwXzWXaiX', 'name': 'Andy Weir'}},
+            {'role': {'name': 'Author'}, 'person': None},
+            {'role': {'name': 'Author'}},
+            {'role': {'name': 'Author'},
+             'person': {'id': 'empty1234567', 'name': '  '}},
+        ]
+        release['people'] = [
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'HKxn6QeChR9j', 'name': 'R.C. Bray'}},
+            {'role': {'name': 'Narrator'}, 'person': None},
+        ]
+        install_transport({})
+        tool = make_album()
+        tool.parse_api_response(book, release)
+        self.assertEqual(tool.author, [{'name': 'Andy Weir'}])
+        self.assertEqual(tool.narrator, [{'name': 'R.C. Bray'}])
 
     def test_audible_chip_not_first(self):
         book = load_fixture(BOOK_DETAIL)

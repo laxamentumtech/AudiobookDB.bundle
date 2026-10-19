@@ -41,30 +41,6 @@ if sys.version_info[0] >= 3:
 
     _search_tools.ScoreTool.reduce_string = _reduce_string
 
-if sys.version_info[0] < 3:
-    # Legacy ``logging.py::log_output`` builds ``"{key:<20}{val}".format(...)``
-    # from a byte-string template. On py2, ``str.format`` raises
-    # UnicodeEncodeError for any non-ASCII unicode value (and py2
-    # ``json.loads`` always returns unicode), so any non-ASCII metadata
-    # (e.g. a Spanish narrator) crashed the real agent (LEGACY_ISSUES #12).
-    # The real Plex ``Log`` object is unicode-safe, so the harness coerces
-    # to unicode here to keep e2e tests runnable; the bundle code stays
-    # verbatim.
-    import logging as _logging_mod
-
-    def _log_output(self, key, val, log_level):
-        if not isinstance(key, unicode):
-            key = str(key).decode('utf-8')
-        if not isinstance(val, unicode):
-            val = str(val).decode('utf-8')
-        output = u"{key:<20}{val}".format(key=key, val=val)
-        if log_level.lower() == "debug":
-            self.debug(output)
-        else:
-            self.info(output)
-
-    _logging_mod.Logging.log_output = _log_output
-
 
 class English(object):
     """Identity token for Locale.Language.English (equal by ==)."""

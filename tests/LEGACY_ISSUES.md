@@ -28,7 +28,7 @@ Pinned by `test_update_tools.TestUpdateToolHelpers`
 The legacy ID scheme is gone end to end. `check_for_asin`
 (`search_tools.py`) is the **sole** result appender for quick matches: it
 resolves a legacy ASIN through `api_client.resolve_asin_book` /
-`resolve_person` and appends a native `book.<id>/.release.<id>` /
+`api_client.resolve_asin_person` and appends a native `book.<id>/.release.<id>` /
 `person.<id>` result (score 100). The agent's `search()` no longer appends
 anything itself. Artist ASIN quick match is manual-input only (legacy
 parity — album/track filenames are not scanned for artist ASINs). Legacy
@@ -69,8 +69,11 @@ never used (fixture: openlibrary 4.3 first, audible 4.8 -> 9.6). Pinned by
 
 ## 9. `json_decode` catches only `AttributeError` — **RESOLVED (deleted)**
 
-`json_decode` was deleted with `make_request`. `api_client` raises on
-malformed payloads; no silent-corruption path remains.
+`json_decode` was deleted with `make_request`. `api_client.decode` catches
+JSON parse errors (`ValueError`/`AttributeError`) and returns `None`, so a
+malformed payload surfaces as `None` for the caller to handle — no
+silent-corruption path remains. Pinned by `test_api_client.py`
+`TestMakeRequest` (`test_malformed_json_returns_none`).
 
 ## 10. Manual artist search overwrites `media.album` with `media.name` — **KEPT**
 
@@ -85,28 +88,34 @@ before scoring (album content type). Pinned by
 `images[0]['url'] + '/large.jpg'` as the thumb when present. Search hits
 omit `images`, so the search list has no artwork (see #14).
 
-## 12. `logging.log_output` crashes on non-ASCII metadata under Python 2 — **KEPT (shimmed)**
+## 12. `logging.log_output` crashes on non-ASCII metadata under Python 2 — **RESOLVED (unicode template)**
 
-`logging.py` is unchanged; the `tests/plex_shim.py` py2 rebind of
-`log_output` to a unicode-safe equivalent remains so the suite can run
-end-to-end on both interpreters.
+`logging.py` `log_output` now formats with a unicode template
+(`u"{key:<20}{val}"`), so non-ASCII catalog text no longer raises
+UnicodeEncodeError on Python 2; the `tests/plex_shim.py` py2 rebind of
+`log_output` has been dropped, and the py2 CI leg exercises the shipped
+implementation.
 
 ---
 
 ## New issues (post-migration)
 
-### 13. Filename ASIN regex `(?=.\d)` matches across URL-encoded spaces
+### 13. Filename ASIN regex `(?=.\d)` anchors the match, not the ASIN's end
 
 - **Where:** `search_tools.py:17` `asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')`
   (inherited verbatim from the legacy agent).
-- **Behaviour:** The lookahead `(?=.\d)` is intended to require a digit
-  within one character after the ASIN (separating it from longer digit
-  runs), but `.` matches **any** character except newline — including the `%`
-  of a URL-encoded filename. In `..._B00B5HZGUG%20(1)...` the lookahead sees
-  `B00B5HZGUG%2` and matches, i.e. the ASIN is found even when the trailing
-  digit separator is a space. The legacy agent had the same quirk; it is kept
-  for parity (it only widens matches, and the resolution step 404s
-  non-catalog ASINs).
+- **Behaviour:** The lookahead `(?=.\d)` runs at the match start: it requires
+  that the character two positions ahead (the candidate's second character)
+  is a digit. It does not look past the 10-character candidate, so nothing
+  after the ASIN is inspected — `B00B5HZGUG1` matches the same `B00B5HZGUG`.
+  The practical effect is that a 10-character window inside a longer
+  alphanumeric run still matches, provided that window's second character is
+  a digit: `1B00B5HZGUG` matches `B00B5HZGUG` (the lookahead is checked at
+  each position, so the match simply starts at index 1).
+- **No URL-encoding quirk:** `check_for_asin` URL-decodes the filename
+  (`url_parse.unquote`) *before* matching, so the regex sees a plain
+  filename — `%` characters from encodings like `%20` are never fed to it.
+  The legacy agent had the same unquote-before-match step; parity is kept.
 - **Pinned by:** `test_search_tools.TestCheckForAsinBooks` (filename case),
   `test_agent.TestAlbumQuickMatch.test_asin_in_filename_appends_single_score_100`.
 

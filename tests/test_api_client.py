@@ -36,16 +36,23 @@ def api_body(payload):
 
 
 def install_transport(mapping, default=''):
-    """Map URL -> (status, body); records requests on HTTP.requests."""
+    """Map URL -> (status, headers, body); records requests on HTTP.requests.
+
+    The headers entry may be omitted for a bare (status, body) tuple.
+    """
     def transport(url, method='GET', headers=None, data=None):
         if url in mapping:
-            status, body = mapping[url]
+            spec = mapping[url]
         else:
-            status, body = 404, default
-        return _HTTPRequest(status, body)
+            spec = (404, {}, default)
+        if len(spec) == 2:
+            status, body = spec
+            resp_headers = {}
+        else:
+            status, resp_headers, body = spec
+        return _HTTPRequest(status, body, resp_headers)
     HTTP.Reset()
     HTTP.Headers = {}
-    HTTP.Headers['X-API-Key'] = 'anonymous'
     HTTP.transport = transport
     Prefs['logging_level'] = 'ERROR'
     return transport
@@ -68,6 +75,19 @@ class TestMakeRequest(unittest.TestCase):
         install_transport({BASE + '/x': (200, 'not json')})
         self.assertIsNone(api_client.make_request(BASE + '/x'))
 
+    def test_get_sends_api_key(self):
+        # The configured key rides on GETs, like POSTs do; when the pref is
+        # unset the 'anonymous' fallback is sent.
+        for key, expected in (('test-key', 'test-key'), ('', 'anonymous')):
+            Prefs['api_key'] = key
+            install_transport({BASE + '/x': (200, '{"a": 1}')})
+            self.assertEqual(api_client.make_request(BASE + '/x'), {'a': 1})
+            url, method, headers, data = HTTP.requests[0]
+            # GETs carry no explicit method (None is the GET default).
+            self.assertIn(method, (None, 'GET'))
+            self.assertEqual(headers['X-API-Key'], expected)
+        Prefs['api_key'] = ''
+
     def test_error_envelope_returns_none(self):
         install_transport({BASE + '/x': (200, '{"errors": [{"status": "404"}]}')})
         self.assertIsNone(api_client.make_request(BASE + '/x'))
@@ -81,19 +101,102 @@ class TestMakeRequest(unittest.TestCase):
 
 class TestFetchBytes(unittest.TestCase):
     def test_returns_bytes(self):
-        install_transport({BASE + '/img': (200, 'JPEG-DATA')})
+        install_transport({'https://cdn.audiobookdb.org/img':
+                           (200, 'JPEG-DATA')})
         self.assertEqual(
-            api_client.fetch_bytes(BASE + '/img'), b'JPEG-DATA')
+            api_client.fetch_bytes('https://cdn.audiobookdb.org/img'),
+            b'JPEG-DATA')
 
     def test_raises_after_exhaustion(self):
         install_transport({})
-        self.assertRaises(IOError, api_client.fetch_bytes, BASE + '/img')
+        self.assertRaises(
+            IOError, api_client.fetch_bytes,
+            'https://cdn.audiobookdb.org/img')
+
+    def test_redirect_to_trusted_host_succeeds(self):
+        install_transport({
+            'https://cdn.audiobookdb.org/img':
+                (302, {'Location': 'https://cdn.audiobookdb.org/img/real'}, ''),
+            'https://cdn.audiobookdb.org/img/real':
+                (200, 'JPEG-DATA'),
+        })
+        self.assertEqual(
+            api_client.fetch_bytes('https://cdn.audiobookdb.org/img'),
+            b'JPEG-DATA')
+        # Both the original and the followed hop were requested.
+        self.assertEqual(
+            [req[0] for req in HTTP.requests],
+            ['https://cdn.audiobookdb.org/img',
+             'https://cdn.audiobookdb.org/img/real'])
+
+    def test_redirect_relative_within_host_succeeds(self):
+        install_transport({
+            'https://cdn.audiobookdb.org/img':
+                (302, {'Location': '/img/real'}, ''),
+            'https://cdn.audiobookdb.org/img/real':
+                (200, 'JPEG-DATA'),
+        })
+        self.assertEqual(
+            api_client.fetch_bytes('https://cdn.audiobookdb.org/img'),
+            b'JPEG-DATA')
+
+    def test_redirect_to_off_allowlist_host_blocked(self):
+        install_transport({
+            'https://cdn.audiobookdb.org/img':
+                (302, {'Location': 'https://evil.example.com/img'}, ''),
+            'https://evil.example.com/img':
+                (200, 'EVIL'),
+        })
+        self.assertRaises(
+            IOError, api_client.fetch_bytes, 'https://cdn.audiobookdb.org/img')
+        # The off-allowlist target must never be requested.
+        self.assertEqual(
+            [req[0] for req in HTTP.requests],
+            ['https://cdn.audiobookdb.org/img'])
+
+    def test_redirect_to_http_scheme_blocked(self):
+        install_transport({
+            'https://cdn.audiobookdb.org/img':
+                (302, {'Location': 'http://cdn.audiobookdb.org/img/plain'}, ''),
+        })
+        self.assertRaises(
+            IOError, api_client.fetch_bytes, 'https://cdn.audiobookdb.org/img')
+
+    def test_redirect_loop_exhausts_hops(self):
+        # Two trusted hops that bounce back to the first URL: the hop limit
+        # (MAX_IMAGE_REDIRECTS) stops the chain before it loops forever.
+        install_transport({
+            'https://cdn.audiobookdb.org/a':
+                (302, {'Location': 'https://cdn.audiobookdb.org/b'}, ''),
+            'https://cdn.audiobookdb.org/b':
+                (302, {'Location': 'https://cdn.audiobookdb.org/a'}, ''),
+        })
+        self.assertRaises(
+            IOError, api_client.fetch_bytes, 'https://cdn.audiobookdb.org/a')
+        # 1 (start) + MAX_IMAGE_REDIRECTS hops were requested, no more.
+        self.assertEqual(
+            len(HTTP.requests), 1 + api_client.MAX_IMAGE_REDIRECTS)
+
+    def test_non_https_url_rejected(self):
+        install_transport({'http://cdn.audiobookdb.org/img':
+                           (200, 'JPEG-DATA')})
+        self.assertRaises(
+            IOError, api_client.fetch_bytes,
+            'http://cdn.audiobookdb.org/img')
+        self.assertEqual(HTTP.requests, [])  # no request made
+
+    def test_untrusted_host_rejected(self):
+        install_transport({'https://example.com/img':
+                           (200, 'JPEG-DATA')})
+        self.assertRaises(
+            IOError, api_client.fetch_bytes, 'https://example.com/img')
+        self.assertEqual(HTTP.requests, [])  # no request made
 
 
 class TestPostJson(unittest.TestCase):
     def test_headers_and_body(self):
         install_transport({BASE + '/search': (200, '[{"id": "x"}]')})
-        HTTP.Headers['X-API-Key'] = 'test-key'
+        Prefs['api_key'] = 'test-key'
         out = api_client.post_json('/search', {'q': 'martian', 'type': 'books'})
         self.assertEqual(out, [{'id': 'x'}])
         url, method, headers, data = HTTP.requests[0]
@@ -107,6 +210,7 @@ class TestPostJson(unittest.TestCase):
                 data.decode('utf-8') if isinstance(data, bytes) else data),
             {'q': 'martian', 'type': 'books'}
         )
+        Prefs['api_key'] = ''
 
     def test_failure_returns_none(self):
         install_transport({})
@@ -212,6 +316,31 @@ class TestDetailAndGetters(unittest.TestCase):
 
 
 class TestRetryAfter(unittest.TestCase):
+    def test_429_positive_retry_after_waits_then_succeeds(self):
+        # An ordinary delay-seconds value is slept as-is (no clamping) and
+        # the next attempt succeeds.
+        state = {'n': 0}
+        Prefs['logging_level'] = 'ERROR'
+        sleeps = []
+        real_sleep = api_client.sleep
+
+        def transport(url, method='GET', headers=None, data=None):
+            state['n'] += 1
+            if state['n'] == 1:
+                return _HTTPRequest(429, '', {'Retry-After': '7'})
+            return _HTTPRequest(200, '{"ok": true}')
+        HTTP.Reset()
+        HTTP.transport = transport
+        api_client.sleep = sleeps.append
+        try:
+            self.assertEqual(api_client.make_request(BASE + '/x'),
+                             {'ok': True})
+        finally:
+            api_client.sleep = real_sleep
+        self.assertEqual(state['n'], 2)
+        # The 7-second delay, verbatim: no default, no clamp.
+        self.assertEqual(sleeps, [7])
+
     def test_429_then_success(self):
         state = {'n': 0}
         Prefs['logging_level'] = 'ERROR'
@@ -222,7 +351,6 @@ class TestRetryAfter(unittest.TestCase):
                 return _HTTPRequest(429, '', {'retry-after': '0'})
             return _HTTPRequest(200, '{"ok": true}')
         HTTP.Reset()
-        HTTP.Headers = {'X-API-Key': 'anonymous'}
         HTTP.transport = transport
         self.assertEqual(api_client.make_request(BASE + '/x'), {'ok': True})
         self.assertEqual(state['n'], 2)
@@ -233,7 +361,6 @@ class TestRetryAfter(unittest.TestCase):
         def transport(url, method='GET', headers=None, data=None):
             return _HTTPRequest(429, '', {'retry-after': '0'})
         HTTP.Reset()
-        HTTP.Headers = {'X-API-Key': 'anonymous'}
         HTTP.transport = transport
         self.assertIsNone(api_client.make_request(BASE + '/x'))
         self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
@@ -246,17 +373,16 @@ class TestRetryAfter(unittest.TestCase):
         def transport(url, method='GET', headers=None, data=None):
             return _HTTPRequest(429, '', {'retry-after': '99999'})
         HTTP.Reset()
-        HTTP.Headers = {'X-API-Key': 'anonymous'}
         HTTP.transport = transport
         api_client.sleep = sleeps.append
         try:
             self.assertIsNone(api_client.make_request(BASE + '/x'))
         finally:
             api_client.sleep = real_sleep
-        # Every 429 attempt (all of them) sleeps the clamped bound,
-        # never 99999.
+        # Every 429 attempt except the final one sleeps the clamped bound,
+        # never 99999; there is no attempt after the last, so no sleep.
         self.assertEqual(sleeps, [api_client.MAX_RETRY_AFTER] *
-                         api_client.MAX_ATTEMPTS)
+                         (api_client.MAX_ATTEMPTS - 1))
 
     def test_429_negative_retry_after_falls_back(self):
         Prefs['logging_level'] = 'ERROR'
@@ -266,7 +392,6 @@ class TestRetryAfter(unittest.TestCase):
         def transport(url, method='GET', headers=None, data=None):
             return _HTTPRequest(429, '', {'retry-after': '-5'})
         HTTP.Reset()
-        HTTP.Headers = {'X-API-Key': 'anonymous'}
         HTTP.transport = transport
         api_client.sleep = sleeps.append
         try:
@@ -274,7 +399,31 @@ class TestRetryAfter(unittest.TestCase):
         finally:
             api_client.sleep = real_sleep
         # A negative value must not raise; it falls back to the default.
-        self.assertEqual(sleeps, [0] * api_client.MAX_ATTEMPTS)
+        # No sleep after the final attempt.
+        self.assertEqual(sleeps, [0] * (api_client.MAX_ATTEMPTS - 1))
+
+    def test_future_http_date_waits_until_requested_time(self):
+        # A future HTTP-date must yield a wait of ~now until that time,
+        # not the 1s default the old time() - epoch computation produced.
+        from email.utils import formatdate
+        requested = int(api_client.time_mod.time()) + 45
+        http_date = formatdate(timeval=requested, usegmt=True)
+        delay = api_client.retry_after_seconds(
+            _HTTPRequest(429, '', {'Retry-After': http_date}))
+        # The clock may tick between request and check; allow +-1s.
+        self.assertGreaterEqual(delay, 43)
+        self.assertLessEqual(delay, 45)
+
+    def test_past_http_date_falls_back(self):
+        # An HTTP-date already in the past yields a negative interval and
+        # falls back to the default.
+        from email.utils import formatdate
+        http_date = formatdate(
+            timeval=int(api_client.time_mod.time()) - 3600, usegmt=True)
+        self.assertEqual(
+            api_client.retry_after_seconds(
+                _HTTPRequest(429, '', {'Retry-After': http_date})),
+            api_client.DEFAULT_RETRY_AFTER)
 
 
 if __name__ == '__main__':

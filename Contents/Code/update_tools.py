@@ -269,23 +269,31 @@ class AlbumUpdateTool(UpdateTool):
         self.title = book.get('title') or ''
         self.subtitle = book.get('subtitle') or ''
         self.synopsis = book.get('description') or ''
+        # People whose person is absent/null or has no name are dropped:
+        # tagging downstream calls re.match() (authors) and .strip()
+        # (narrators) on the name, which would raise before the native ID
+        # commits.
         self.author = [
             {'name': p['person']['name']}
             for p in book.get('people') or []
-            if p['role']['name'] == 'Author'
+            if (p.get('role') or {}).get('name') == 'Author'
+            and ((p.get('person') or {}).get('name') or '').strip()
         ]
         self.narrator = []
         if release:
             self.narrator = [
                 {'name': p['person']['name']}
                 for p in release.get('people') or []
-                if p['role']['name'] == 'Narrator'
+                if (p.get('role') or {}).get('name') == 'Narrator'
+                and ((p.get('person') or {}).get('name') or '').strip()
             ]
         self.studio = ((release.get('publisher') or {}).get('name')
                        or '') if release else ''
         self.date = (self.getDateFromString(release.get('releaseDate'))
                      if release else None)
-        self.genres = [{'name': g['title']} for g in book.get('genres') or []]
+        self.genres = [
+            {'name': g.get('title')} for g in book.get('genres') or []
+        ]
 
         # Rating: select the audible chip specifically (never by position).
         self.rating = None
@@ -299,11 +307,11 @@ class AlbumUpdateTool(UpdateTool):
         series_list = book.get('series') or []
         if len(series_list) > 0:
             entry = series_list[0]
-            self.series = entry['series']['title']
+            self.series = (entry.get('series') or {}).get('title')
             self.volume = self.series_volume(entry)
         if len(series_list) > 1:
             entry = series_list[1]
-            self.series2 = entry['series']['title']
+            self.series2 = (entry.get('series') or {}).get('title')
             self.volume2 = self.series_volume(entry)
 
         # Thumb from coverImage (sized derivative).
@@ -541,7 +549,9 @@ class ArtistUpdateTool(UpdateTool):
 
         self.name = person.get('name') or ''
         self.description = person.get('description') or ''
-        self.genres = [{'name': g['title']} for g in person.get('genres') or []]
+        self.genres = [
+            {'name': g.get('title')} for g in person.get('genres') or []
+        ]
         images = person.get('images') or []
         if images and images[0].get('url'):
             self.thumb = images[0]['url'] + '/large.jpg'
@@ -579,22 +589,30 @@ class ArtistUpdateTool(UpdateTool):
             Set sort title of artist
         """
         if not self.metadata.title_sort or self.force:
+            # An empty name yields no sort title; set_metadata_title has
+            # already blanked metadata.title, so use the title as-is.
+            if not self.name:
+                self.metadata.title_sort = self.metadata.title
+                return
             single_word_name = re.match(r'\A[\w-]+\Z', self.name)
             if self.prefs['sort_author_by_last_name'] and not single_word_name:
                 split_author_surname = re.match(
                     '^(.+?).([^\s,]+)(,?.(?:[JS]r\.?|III?|IV))?$',
                     self.name,
                 )
-                self.metadata.title_sort = ', '.join(
-                    filter(
-                        None,
-                        [
-                            (split_author_surname.group(2) + ', ' +
-                                split_author_surname.group(1)),
-                            split_author_surname.group(3)
-                        ]
+                if split_author_surname:
+                    self.metadata.title_sort = ', '.join(
+                        filter(
+                            None,
+                            [
+                                (split_author_surname.group(2) + ', ' +
+                                    split_author_surname.group(1)),
+                                split_author_surname.group(3)
+                            ]
+                        )
                     )
-                )
+                else:
+                    self.metadata.title_sort = self.metadata.title
             else:
                 self.metadata.title_sort = self.metadata.title
 
