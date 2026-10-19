@@ -58,18 +58,22 @@ After a restart, *AudiobookDB Agent* appears in the agent picker for audiobook l
 
 ## Usage
 
-1. Open the **Edit Library** dialog for a Music library that holds your audiobooks in Plex (or create a new Music library).
-2. On the **Advanced** tab, choose **AudiobookDB Agent** from the **Agent** drop-down. Existing libraries keep their current agent until you switch it here.
-3. Optionally set the preferences below, then run a refresh.
+1. Configure your personal key before full-library matching: [generate your personal AudiobookDB API key](https://audiobookdb.org/docs#authentication) and add it in Plex (steps below). Anonymous access is intended for browsing/searching, not full-library enrichment.
+2. Open the **Edit Library** dialog for a Music library that holds your audiobooks in Plex (or create a new Music library).
+3. On the **Advanced** tab, choose **AudiobookDB Agent** from the **Agent** drop-down. Existing libraries keep their current agent until you switch it here.
+4. Optionally set the other preferences below, then run a refresh.
 
 A refresh populates from AudiobookDB: books appear as albums — title, sort title, summary, studio, original release date, rating, genres, moods/styles, poster, and the native ID; authors appear as artists — name, sort title, summary, genres, poster, and native ID. Narrators are stored as Style tags, not as separate profiles. Series information is stored as Mood tags, not as Plex collections.
 
 ## Configuration
 
 Preferences are set in the Plex Web App under **Settings → Server → Agents**: choose the agent, then click the gear icon to its right (see Plex's [Agents](https://support.plex.tv/articles/200241558-agents/) article).
+
+To get a personal key, sign in at [audiobookdb.org](https://audiobookdb.org), open your account settings page (`/users/{your-id}/edit`), and use the **API Key** card's **Generate API key** button. The full key is shown only once; copy it and store it securely — do not share or publish it. The **Key ID** is not the secret key. In the agent's Plex preferences, enter the full key in **AudiobookDB API key (optional, raises rate limits)**, then save.
+
 | Preference | Default | Description |
 |---|---|---|
-| `api_key` | *(empty)* | Optional AudiobookDB API key. Raises rate limits; anonymous access works without one. |
+| `api_key` | *(empty)* | Enter your personal AudiobookDB API key for full-library matching. |
 | `keep_existing_genres` | `false` | Keep existing genres in place. |
 | `store_author_as_mood` | `true` | Append authors as Mood tags. |
 | `sort_author_by_last_name` | `true` | Sort artist by name `[Last, First]`. |
@@ -89,8 +93,10 @@ Put an ASIN in the manual search field (or in the media filename for albums) and
 
 - Base URL: `https://audiobookdb.org/api` — see the [API documentation](https://audiobookdb.org/docs/api).
 - Free-text search requires a query of at least 3 characters.
-- Calls retry up to 4 total attempts, honouring a server-supplied `Retry-After` (capped at 60 s).
-- The `api_key` preference is attached to requests to the API origin only.
+- Calls make up to 4 total attempts. `Retry-After` delays are capped at 60 seconds; the client does not guarantee honoring a longer server delay.
+- The key is sent only to the AudiobookDB API origin. The Plex preference is optional in the software, which defaults to `anonymous` when empty and does not validate credentials; full-library matching still requires your personal key as described above.
+- Your Plex agent and any other AudiobookDB client using the same key share that account's allowance. Short-term request throttling and daily endpoint cost-unit budgets are separate; costs vary by endpoint, and there is no fixed books-per-day or requests-per-day equivalence. See the live [access tiers and limits](https://audiobookdb.org/docs#api-access-tiers) and [endpoint costs](https://audiobookdb.org/docs#endpoint-costs) rather than relying on static quota figures.
+- A missing/invalid/expired/suspended key, a 429 throttle, or network/server errors are not evidence that an audiobook is absent from the catalog. The agent does not provide credential validation, a daily-budget stop, or automatic pause/resume. If a refresh fails, check the key and Plex preference; for throttling or exhausted daily allowance, wait for capacity to return before using Plex's refresh control. Do not immediately restart a full-library refresh. A genuine catalog miss is distinct and may require adding the external link to AudiobookDB.
 - Image fetches are restricted to HTTPS on the catalog's image CDN (`cdn.audiobookdb.org`); other hosts and plain HTTP are refused.
 
 ## Migrating from Audnexus
