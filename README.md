@@ -67,7 +67,6 @@ A refresh populates from AudiobookDB: books appear as albums — title, sort tit
 ## Configuration
 
 Preferences are set in the Plex Web App under **Settings → Server → Agents**: choose the agent, then click the gear icon to its right (see Plex's [Agents](https://support.plex.tv/articles/200241558-agents/) article).
-
 | Preference | Default | Description |
 |---|---|---|
 | `api_key` | *(empty)* | Optional AudiobookDB API key. Raises rate limits; anonymous access works without one. |
