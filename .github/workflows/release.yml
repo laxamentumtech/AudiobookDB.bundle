@@ -1,0 +1,35 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run suite (python3)
+        run: make test
+
+      - name: Run suite (python:2.7-slim)
+        run: make test-py2
+
+      - name: Package bundle
+        run: |
+          rm -f Contents/Code/*.pyc
+          rm -rf Contents/Code/__pycache__
+          mkdir -p AudiobookDB.bundle
+          cp -r Contents AudiobookDB.bundle/
+          zip -r "AudiobookDB.bundle.zip" AudiobookDB.bundle/
+          unzip -l "AudiobookDB.bundle.zip"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "AudiobookDB.bundle.zip"
+          generate_release_notes: true

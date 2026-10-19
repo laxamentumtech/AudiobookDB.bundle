@@ -1,0 +1,159 @@
+{
+  "id": "WQQDcMBQ3qUT",
+  "title": "The Martian",
+  "copyright": 2011,
+  "description": "Six days after becoming one of the first humans to walk on Mars, astronaut Mark Watney is pretty sure he's about to become the first to die there. A vicious dust storm tore through the mission, left him gravely injured, and drove his crew to evacuate believing he was already gone. Now he's utterly alone on a hostile planet with no way to signal Earth — and even if he could, his supplies would run out long before any rescue could reach him. Starvation might be the least of his worries; broken equipment, the merciless Martian environment, or simple human error are all far more likely to finish him off first. But Mark has no intention of giving up. Armed with engineering chops, relentless ingenuity, and a stubborn refusal to quit, he tackles one impossible problem after another. This edition also includes bonus writings from Watney himself — including a new astronaut's diary, two letters home to Mom, and a postscript available here for the first time.",
+  "type": "fiction",
+  "createdAt": "2026-08-22T07:59:24Z",
+  "updatedAt": "2026-08-22T07:59:24Z",
+  "genres": [
+    {
+      "id": "NF493Q9ygkpm",
+      "title": "Action & Adventure"
+    },
+    {
+      "id": "J8RQmxkzcMFV",
+      "title": "Fantasy"
+    },
+    {
+      "id": "4pnwAczyaHXx",
+      "title": "Science Fiction"
+    }
+  ],
+  "images": [
+    {
+      "id": "3iHhc7zKrgDk",
+      "url": "https://cdn.audiobookdb.org/5b9dd618d7526bf4d08384d1506ca36e93515d8154df3f8485c6a93dc10c4045",
+      "sourceUrl": "https://cdn.audiobookdb.org/5b9dd618d7526bf4d08384d1506ca36e93515d8154df3f8485c6a93dc10c4045/source.jpg:book",
+      "width": 2400,
+      "height": 2400,
+      "blurdata": "UGDSN[05pF%2IJ-#N1Rl56s;xGxoWAfA-mN2"
+    }
+  ],
+  "coverImage": {
+    "id": "3iHhc7zKrgDk",
+    "url": "https://cdn.audiobookdb.org/5b9dd618d7526bf4d08384d1506ca36e93515d8154df3f8485c6a93dc10c4045",
+    "sourceUrl": "https://cdn.audiobookdb.org/5b9dd618d7526bf4d08384d1506ca36e93515d8154df3f8485c6a93dc10c4045/source.jpg:book",
+    "width": 2400,
+    "height": 2400,
+    "blurdata": "UGDSN[05pF%2IJ-#N1Rl56s;xGxoWAfA-mN2"
+  },
+  "originalLanguage": {
+    "name": "English"
+  },
+  "people": [
+    {
+      "role": {
+        "name": "Author"
+      },
+      "person": {
+        "id": "ypMPwXzWXaiX",
+        "name": "Andy Weir",
+        "description": "Andy Weir is a California-based author who previously spent twenty years working as a software engineer. He transitioned to writing as a full-time profession following the success of his debut novel, *The Martian*. His work is informed by his personal interests in the history of crewed space missions, orbital mechanics, and relativistic physics.",
+        "genres": [
+          {
+            "id": "J8RQmxkzcMFV",
+            "title": "Fantasy"
+          },
+          {
+            "id": "iTQfABYdQPXH",
+            "title": "Mystery"
+          },
+          {
+            "id": "4pnwAczyaHXx",
+            "title": "Science Fiction"
+          },
+          {
+            "id": "mHdBqB8xzxT8",
+            "title": "Thriller & Suspense"
+          }
+        ],
+        "roles": [
+          {
+            "role": {
+              "name": "Author"
+            },
+            "book": {
+              "id": "LdCtkQmDpqB3",
+              "title": "Cheshire Crossing",
+              "images": [
+                {
+                  "id": "PaedWb7q8ja3",
+                  "url": "https://cdn.audiobookdb.org/de465cdf5b0ff02c84d3ea1840bd86cf615fe441d364686557d72bc304e44be5",
+                  "sourceUrl": "https://cdn.audiobookdb.org/de465cdf5b0ff02c84d3ea1840bd86cf615fe441d364686557d72bc304e44be5/source.jpg:book",
+                  "width": 1650,
+                  "height": 1650,
+                  "blurdata": "URLMR?s-*M-U_3j[R%kC.8t7IVNGXnxbnONG"
+                }
+              ]
+            }
+          },
+          {
+            "role": {
+              "name": "Author"
+            },
+            "book": {
+              "id": "7TkgNAy9Twge",
+              "title": "Forward",
+              "images": [
+                {
+                  "id": "f3TtQTGfxMDX",
+                  "url": "https://cdn.audiobookdb.org/0d5c677141f906ec2d8bf819a7d3f95003837c00e980bc70e67a2cdc87487b60",
+                  "sourceUrl": "https://cdn.audiobookdb.org/0d5c677141f906ec2d8bf819a7d3f95003837c00e980bc70e67a2cdc87487b60/source.jpg:book",
+                  "width": 2400,
+                  "height": 2400,
+                  "blurdata": "UK8X9ZD@s_WT9j%ERQaixaV~WBtJoaR.xsM#"
+                }
+              ]
+            }
+          },
+          {
+            "role": {
+              "name": "Author"
+            },
+            "book": {
+              "id": "r9Ewj6JxaGCW",
+              "title": "The Egg",
+              "images": [
+                {
+                  "id": "m3dqDVmy4x6D",
+                  "url": "https://cdn.audiobookdb.org/2c1a91f8f919f72110dcee16ce73156c982f1e075f3c8d6d0f18cf9f8fce0e25",
+                  "sourceUrl": "https://cdn.audiobookdb.org/2c1a91f8f919f72110dcee16ce73156c982f1e075f3c8d6d0f18cf9f8fce0e25/source.jpg:book",
+                  "width": 2400,
+                  "height": 2400,
+                  "blurdata": "UREfQaN34mR*-@-mIURkt6Rnxut5WBRkt3Rp"
+                }
+              ]
+            }
+          },
+          {
+            "role": {
+              "name": "Author"
+            },
+            "book": {
+              "id": "dbMnz33NyTfE",
+              "title": "Randomize",
+              "images": [
+                {
+                  "id": "VyUCqa9A6ime",
+                  "url": "https://cdn.audiobookdb.org/62d72ab6c132c90412135562701db74a71bba6a6167f19e9118e44e533d2b2c7",
+                  "sourceUrl": "https://cdn.audiobookdb.org/62d72ab6c132c90412135562701db74a71bba6a6167f19e9118e44e533d2b2c7/source.jpg:book",
+                  "width": 2400,
+                  "height": 2400,
+                  "blurdata": "UJAT8fD[$_bdIi-$RpWFS=RXR*xpM@RlxoIa"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "releases": [],
+  "tags": [
+    {
+      "id": "tyqYw9JKQ96j",
+      "title": "Hard Science Fiction"
+    }
+  ]
+}
