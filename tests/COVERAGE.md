@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 242 tests, 0 network.
+`python:2.7-slim` in docker, full unittest discovery). 275 tests, 0 network.
 
 Note: the py3 shim (`tests/plex_shim.py`) monkeypatches
 `ScoreTool.reduce_string` to decode bytes first, because the production
@@ -21,15 +21,15 @@ slightly py3-adapted scoring path; the bundle targets python2.7.
 | `update_tools.py` | `test_update_tools.py` |
 | (sandbox compliance of every shipped module) | `test_sandbox_compliance.py` (7 tests: underscore-name ban, unavailable-builtin ban, code-dir presence) |
 
-## `test_agent.py` (24 tests) — end-to-end agent flows
+## `test_agent.py` (34 tests) — end-to-end agent flows
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestStartAndIdentity` | 5 | `Start`, `ValidatePrefs`, `getDateFromString`, agent name/prefix constants |
-| `TestAlbumSearch` | 4 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all) |
+| `TestAlbumSearch` | 13 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all), ordering conflicts dropped automatically but visible manually (with and without an artist), supported/mid-range candidates still appended, course/pack controls |
 | `TestAlbumQuickMatch` | 3 | `search` ASIN quick-match: album/filename ASIN → single 100-point result; unresolvable ASIN falls through |
 | `TestAlbumUpdate` | 8 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only), forced update with empty/null description keeps the existing summary and still writes title/studio/styles/native ID |
-| `TestArtistSearchAndUpdate` | 4 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID |
+| `TestArtistSearchAndUpdate` | 5 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID |
 
 ## `test_api_client.py` (35 tests)
 
@@ -62,23 +62,24 @@ slightly py3-adapted scoring path; the bundle targets python2.7.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (66 tests)
+## `test_search_tools.py` (86 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
-| `TestCheckForAsinBooks` | 8 | album ASIN check: filename, album, and native `book.` ID sources (incl. release pair), release/ASIN/ID 404s and non-ID input → `False` |
-| `TestCheckForAsinPeople` | 7 | artist ASIN check: sources, non-ASIN ignored |
+| `TestCheckForAsinBooks` | 9 | album ASIN check: filename, album, and native `book.` ID sources (incl. release pair), release/ASIN/ID 404s and non-ID input → `False` |
+| `TestCheckForAsinPeople` | 8 | artist ASIN check: sources, non-ASIN ignored |
 | `TestSearchToolHelpers` | 5 | `validate_author_name`: clears bad, keeps good, sets primary author |
 | `TestAlbumSearchToolBody` | 5 | `build_search_body`: with/without artist filters, too-short → `None`, nothing → `None`, filters-only (short title + artist) |
 | `TestNameToInitials` | 5 | `name_to_initials`: full names, already abbreviated, multi-word |
 | `TestNormalizeName` | 3 | `normalize_name`: brackets/specials/words stripped, album→title fallback, diacritics |
-| `TestAlbumParseApiResponse` | 4 | album `parse_api_response`: fixture hits, missing required keys, non-dict items, no narrator role |
+| `TestAlbumParseApiResponse` | 7 | album `parse_api_response`: fixture hits, missing required keys, non-dict items, no narrator role, `seriesWithId` preserved (title/ordinal/position), missing/non-dict series defaults to `[]` |
 | `TestPreSearchLogging` | 5 | `pre_search_logging`: missing album → track title, unknown album → `None`, manual |
 | `TestArtistSearchToolBody` | 2 | `build_search_body` (artist): body, too-short → `None` |
 | `TestCleanupAuthorName` | 4 | `cleanup_author_name`: role removals, diacritics |
 | `TestArtistMultiArtist` | 5 | `find_non_contributor`, `handle_multi_artist`, `get_primary_author` |
 | `TestArtistParseApiResponse` | 2 | artist `parse_api_response`: fixture, missing keys rejected |
 | `TestScoreTool` | 11 | `reduce_string`, `sum_scores`, `run_score_author`, `run_score_book` (perfect, empty people, ignore-boundary skip, index penalty, language deduction), `score_album`/`score_author` no-match → 0, `score_language` mismatch |
+| `TestScoreOrdering` | 15 | `score_ordering` / `ordering_suffix` / `series_position`: the four reported wrong pins drop below the append floor automatically and keep their manual scores; same-number titles and supporting memberships are preserved; unrelated title numbers cannot override or manufacture membership evidence; numeric-ordinal fallback, disjoint spans, absent/fractional/range data; course, pack, volume, year, Roman and spelled-out controls |
 
 ## `test_update_tools.py` (71 tests)
 

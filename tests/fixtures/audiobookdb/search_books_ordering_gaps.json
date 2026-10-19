@@ -1,0 +1,123 @@
+[
+  {
+    "id": "ssOne0000001",
+    "title": "Swing Shift",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {
+        "role": {"name": "Author"},
+        "person": {"id": "personArand", "name": "William D. Arand"}
+      }
+    ],
+    "seriesWithId": [
+      {
+        "id": "seriesSwing",
+        "title": "Swing Shift",
+        "ordinal": "1",
+        "position": {
+          "kind": "point",
+          "status": "complete",
+          "value": "1",
+          "label": "1",
+          "sortKey": 1,
+          "spans": [{"start": 1, "end": 1}]
+        }
+      }
+    ]
+  },
+  {
+    "id": "ssTwo0000001",
+    "title": "Swing Shift",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {
+        "role": {"name": "Author"},
+        "person": {"id": "personArand", "name": "William D. Arand"}
+      }
+    ],
+    "seriesWithId": [
+      {
+        "id": "seriesSwing",
+        "title": "Swing Shift",
+        "ordinal": "2",
+        "position": {
+          "kind": "point",
+          "status": "complete",
+          "value": "2",
+          "label": "2",
+          "sortKey": 2,
+          "spans": [{"start": 2, "end": 2}]
+        }
+      }
+    ]
+  },
+  {
+    "id": "ccOne0000001",
+    "title": "Cultivating Chaos",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {
+        "role": {"name": "Author"},
+        "person": {"id": "personChaos", "name": "William D. Arand"}
+      }
+    ],
+    "seriesWithId": [
+      {
+        "id": "seriesChaos",
+        "title": "Cultivating Chaos",
+        "ordinal": "1",
+        "position": {
+          "kind": "point",
+          "status": "complete",
+          "value": "1",
+          "label": "1",
+          "sortKey": 1,
+          "spans": [{"start": 1, "end": 1}]
+        }
+      }
+    ]
+  },
+  {
+    "id": "ddTwo0000001",
+    "title": "Domestic Decay 2",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {
+        "role": {"name": "Author"},
+        "person": {"id": "personDecay", "name": "William D. Arand"}
+      }
+    ],
+    "seriesWithId": [
+      {
+        "id": "seriesDecay",
+        "title": "Domestic Decay",
+        "ordinal": "2",
+        "position": {
+          "kind": "point",
+          "status": "complete",
+          "value": "2",
+          "label": "2",
+          "sortKey": 2,
+          "spans": [{"start": 2, "end": 2}]
+        }
+      }
+    ]
+  },
+  {
+    "id": "ssNone000001",
+    "title": "Swing Shift",
+    "subtitle": null,
+    "originalLanguage": "English",
+    "people": [
+      {
+        "role": {"name": "Author"},
+        "person": {"id": "personArand", "name": "William D. Arand"}
+      }
+    ],
+    "seriesWithId": []
+  }
+]

@@ -16,6 +16,21 @@ except ImportError:  # pragma: no cover - python 2
 
 asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
 
+# Narrow terminal book-ordinal shapes recognised for automatic ordering
+# checks. Everything else (packs, volumes, ranges, years, fractions) abstains.
+ordering_range_regex = re.compile(
+    u'[0-9]+\\s*(?:-|\u2013|\u2014|to)\\s*[0-9]+\\s*$', re.IGNORECASE)
+ordering_fraction_regex = re.compile(r'[0-9]+\.[0-9]+\s*$')
+ordering_of_regex = re.compile(
+    r'[0-9]+\s+of\s+[0-9]+\s*$', re.IGNORECASE)
+ordering_pack_regex = re.compile(
+    r"(?:\bpack\b|\bvolume\b|\bvol\.?)\s*#?\s*[0-9]{1,3}\s*$",
+    re.IGNORECASE)
+ordering_book_regex = re.compile(
+    r'^(.*?)(?:\s+book\s*#?\s*([0-9]{1,3}))\s*$', re.IGNORECASE)
+ordering_bare_regex = re.compile(
+    u'^(.*?)[\\s\\-:,\u2013\u2014_#]+([0-9]{1,3})\\s*$')
+
 
 class SearchTool:
     def __init__(self, content_type, lang, manual, media, prefs, results):
@@ -351,6 +366,17 @@ class AlbumSearchTool(SearchTool):
                     if (p.get('role') or {}).get('name') == 'Narrator':
                         narrator = [{'name': p['person']['name']}]
                         break
+                series = []
+                for series_item in item.get('seriesWithId') or []:
+                    if not isinstance(series_item, dict):
+                        continue
+                    series.append(
+                        {
+                            'title': series_item.get('title'),
+                            'ordinal': series_item.get('ordinal'),
+                            'position': series_item.get('position'),
+                        }
+                    )
                 search_results.append(
                     {
                         'book_id': metadata_ids.serialize_book_id(
@@ -361,6 +387,7 @@ class AlbumSearchTool(SearchTool):
                         'narrator': narrator,
                         'title': item['title'],
                         'subtitle': item.get('subtitle'),
+                        'seriesWithId': series,
                     }
                 )
         return search_results
@@ -551,6 +578,9 @@ class ScoreTool:
     INITIAL_SCORE = 100
     # Any score lower than this will be ignored.
     IGNORE_SCORE = 45
+    # Deduction for a candidate the folder's series ordinal contradicts.
+    # INITIAL_SCORE - ORDERING_PENALTY - index stays below IGNORE_SCORE.
+    ORDERING_PENALTY = 60
 
     def __init__(
         self,
@@ -677,6 +707,10 @@ class ScoreTool:
             lang_score = self.score_language(self.language)
             if lang_score:
                 all_scores.append(lang_score)
+        # Series ordering score (automatic searches only)
+        ordering_score = self.score_ordering()
+        if ordering_score:
+            all_scores.append(ordering_score)
 
         # Subtract difference from initial score
         # Subtract index to use relevance as weight
@@ -711,6 +745,179 @@ class ScoreTool:
         ) * 2
         log.debug("Score deduction from album: " + str(album_score))
         return album_score
+
+    def plain_integer(self, value):
+        """
+            Returns a positive ASCII integer, or None for anything else
+            (floats, labels, negative or zero positions).
+        """
+        if isinstance(value, float):
+            return None
+        if isinstance(value, int):
+            return value if value > 0 else None
+        try:
+            text = value.strip()
+        except AttributeError:
+            return None
+        if not text:
+            return None
+        for index in range(len(text)):
+            if text[index] not in '0123456789':
+                return None
+        number = int(text)
+        return number if number > 0 else None
+
+    def ordering_suffix(self, text):
+        """
+            Splits a supported terminal book ordinal from a title.
+
+            Returns (stem, number), or None when the title carries no
+            ordinal the scorer can reason about: packs, volumes, ranges,
+            fractions, years, Roman or spelled-out numbers all abstain.
+        """
+        if not text:
+            return None
+        if ordering_range_regex.search(text) \
+                or ordering_fraction_regex.search(text) \
+                or ordering_of_regex.search(text) \
+                or ordering_pack_regex.search(text):
+            return None
+        match = ordering_book_regex.match(text)
+        if match is None:
+            match = ordering_bare_regex.match(text)
+        if match is None:
+            return None
+        stem = match.group(1).strip(
+            u' \t-:;,._#\u2013\u2014')
+        number = int(match.group(2))
+        if not stem or number <= 0:
+            return None
+        return stem, number
+
+    def series_position(self, entry):
+        """
+            Returns the complete [(start, end), ...] ranges an entry claims,
+            or None when the position is unknown. Unknown data is never
+            treated as a contradiction.
+        """
+        position = entry.get('position')
+        if position is None or position == {}:
+            ordinal = self.plain_integer(entry.get('ordinal'))
+            if ordinal is None:
+                return None
+            return [(ordinal, ordinal)]
+        if not isinstance(position, dict):
+            return None
+        status = position.get('status')
+        if status and status != 'complete':
+            return None
+        kind = position.get('kind')
+        if kind and kind not in ('point', 'range'):
+            return None
+        spans = position.get('spans')
+        if spans:
+            ranges = []
+            for span in spans:
+                if not isinstance(span, dict):
+                    return None
+                start = self.plain_integer(span.get('start'))
+                end = self.plain_integer(span.get('end'))
+                if start is None or end is None:
+                    return None
+                ranges.append((start, end))
+            return ranges
+        value = position.get('value')
+        if value is not None:
+            value_number = self.plain_integer(value)
+            if value_number is None:
+                return None
+            return [(value_number, value_number)]
+        label = position.get('label')
+        if label is None or label == '':
+            return None
+        label_value = self.plain_integer(label)
+        if label_value is None:
+            return None
+        return [(label_value, label_value)]
+
+    def score_ordering(self):
+        """
+            Deducts when the folder's book ordinal positively contradicts
+            the candidate. Manual searches are never penalised, and
+            unknown or unsupported numbering data abstains.
+        """
+        if self.helper.manual:
+            return 0
+        if not self.title:
+            return 0
+        album_suffix = self.ordering_suffix(self.helper.media.album)
+        if album_suffix is None:
+            return 0
+        stem, number = album_suffix
+        stem_key = self.reduce_string(stem)
+        if not stem_key:
+            return 0
+
+        title_suffix = self.ordering_suffix(self.title)
+        if title_suffix is None:
+            candidate_number = None
+            candidate_key = self.reduce_string(self.title)
+        else:
+            candidate_stem, candidate_number = title_suffix
+            candidate_key = self.reduce_string(candidate_stem)
+
+        series_entries = []
+        for entry in self.result_dict.get('seriesWithId') or []:
+            if not isinstance(entry, dict):
+                continue
+            series_title = entry.get('title')
+            if series_title and \
+                    self.reduce_string(series_title) == stem_key:
+                series_entries.append(entry)
+
+        if candidate_key != stem_key and not series_entries:
+            return 0
+
+        supported = False
+        contradicted = False
+
+        # The candidate's own title number is evidence only when the title
+        # stem itself matches; a matching series membership does not make an
+        # unrelated title's numbering scheme comparable.
+        if candidate_number is not None and candidate_key == stem_key:
+            if candidate_number == number:
+                supported = True
+            else:
+                contradicted = True
+
+        # Any relevant series membership that covers the number supports it;
+        # one book can hold different positions in different series.
+        for entry in series_entries:
+            position = self.series_position(entry)
+            if position is None:
+                continue
+            entry_supports = False
+            for span in position:
+                if span[0] <= number <= span[1]:
+                    entry_supports = True
+            if entry_supports:
+                supported = True
+            else:
+                contradicted = True
+
+        if supported:
+            return 0
+        if contradicted:
+            log.debug(
+                'Series ordering mismatch: folder book %s, candidate "%s"',
+                number, self.title)
+            return self.ORDERING_PENALTY
+        if candidate_number is None and not series_entries and number > 1:
+            log.debug(
+                'Series ordering mismatch: folder book %s, unnumbered "%s"',
+                number, self.title)
+            return self.ORDERING_PENALTY
+        return 0
 
     def score_author(self, author):
         """
