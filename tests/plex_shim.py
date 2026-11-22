@@ -18,6 +18,7 @@ import unittest  # noqa: F401  (re-exported for test modules)
 
 # Apply py2 -> py3 patches to the stdlib BEFORE bundle modules import it.
 import py23_compat  # noqa: F401  (must stay first)
+from py23_compat import HTTPError  # noqa: E402
 
 # Make ``from search_tools import ...`` etc. resolve to the bundle code.
 _CODE_DIR = os.path.join(os.path.dirname(os.path.dirname(
@@ -80,16 +81,64 @@ class _Results(object):
         self.appended = []
 
 
+class _HTTPHeaderProxy(object):
+    """Mirror of the framework's HTTPHeaderProxy: lower-cased keys,
+    indexing and iteration only, no .get()."""
+
+    def __init__(self, headers):
+        self._headers = dict((str(k).lower(), v)
+                             for k, v in (headers or {}).items())
+
+    def __getitem__(self, name):
+        return self._headers[str(name).lower()]
+
+    def __iter__(self):
+        return self._headers.__iter__()
+
+    def __repr__(self):
+        return repr(self._headers)
+
+
 class _HTTPRequest(object):
-    def __init__(self, status=200, body=None, headers=None):
-        self.status = status
-        self.body = body
-        if isinstance(self.body, bytes):
-            self.body = self.body.decode('utf-8')
-        self.headers = headers or {}
+    """Transport double.
+
+    ``lazy=False`` (default): the test-contract shape with a plain
+    ``.status`` and dict ``.headers``.
+
+    ``lazy=True``: mirrors Plex's real HTTPRequest — no ``.status``
+    attribute, ``headers`` is an ``_HTTPHeaderProxy`` (a headers-only
+    read issues a HEAD), and ``str()`` loads the body, raising
+    ``HTTPError`` (with ``.code``) for non-2xx statuses.
+    """
+
+    def __init__(self, status=200, body=None, headers=None, lazy=False):
+        self._status = status
+        self._headers = headers or {}
+        self._lazy = lazy
+        self._url = None
+        if isinstance(body, bytes):
+            body = body.decode('utf-8')
+        self._body = body
+        self._proxy = _HTTPHeaderProxy(self._headers)
+        if not lazy:
+            self.status = status
+            self.headers = self._headers
+
+    @property
+    def headers(self):
+        # The real transport answers a headers-only read with a HEAD.
+        return self._proxy
+
+    @headers.setter
+    def headers(self, value):
+        self._headers = value
 
     def __str__(self):
-        return self.body or ''
+        if self._lazy and self._status is not None \
+                and not 200 <= self._status < 300:
+            raise HTTPError(self._url or '', self._status,
+                            'HTTP %s' % self._status, self._proxy, None)
+        return self._body or ''
 
 
 class _HTTPModule(object):
@@ -107,17 +156,55 @@ class _HTTPModule(object):
         self.CacheTime = 0
         self._cache = {}
         self.requests = []  # (url, method, headers, data) call log
+        # Mirror of Plex's global cookie jar: Set-Cookie headers on a
+        # response land here and are presented on later requests.
+        self.cookies = {}
 
     def Request(self, url, method='GET', headers=None, data=None,
-                timeout=None, sleep=None):
+                timeout=None, sleep=None, lazy=None):
         self.requests.append((url, method, headers, data))
         cacheable = method == 'GET'
         if cacheable and url in self._cache:
             return self._cache[url]
-        resp = self.transport(url, method=method, headers=headers, data=data)
+        if lazy is not None:
+            resp = self.transport(url, method=method, headers=headers,
+                                  data=data, lazy=lazy)
+        else:
+            resp = self.transport(url, method=method, headers=headers,
+                                  data=data)
+        if not isinstance(resp, _HTTPRequest):
+            resp = _HTTPRequest(200, resp)
+        resp._url = url
+        self._apply_set_cookies(resp)
         if cacheable:
             self._cache[url] = resp
         return resp
+
+    def _apply_set_cookies(self, resp):
+        """Apply the response's Set-Cookie values to the jar (the real
+        transport does this while loading the body)."""
+        raw = None
+        headers = resp._headers
+        if hasattr(headers, 'get'):
+            raw = headers.get('set-cookie')
+        else:
+            for key in headers:
+                if str(key).lower() == 'set-cookie':
+                    raw = headers[key]
+                    break
+        if not raw:
+            return
+        for part in str(raw).replace(',', ';').split(';'):
+            part = part.strip()
+            if '=' in part:
+                name, value = part.split('=', 1)
+                self.cookies[name.strip()] = value.strip()
+
+    def CookiesForURL(self, url=None):
+        return [
+            {'name': name, 'value': value, 'domain': '', 'path': '/'}
+            for name, value in sorted(self.cookies.items())
+        ]
 
     def ClearCache(self):
         self._cache = {}
@@ -126,6 +213,7 @@ class _HTTPModule(object):
     def Reset(self):
         self._cache = {}
         self.requests = []
+        self.cookies = {}
 
 
 class Prefs(dict):

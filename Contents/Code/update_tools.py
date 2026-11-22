@@ -183,32 +183,42 @@ class AlbumUpdateTool(UpdateTool):
                 log.info('Could not resolve ASIN %s; leaving metadata untouched.'
                          % asin)
                 return False
-            book_id = book['id']
         else:
-            book_id, pinned_release_id = self.parsed_id[1], self.parsed_id[2]
-            book = None
+            stored_book_id, pinned_release_id = self.parsed_id[1], \
+                self.parsed_id[2]
+            # A merged book 301s to the canonical winner; the response's
+            # id is authoritative, so a stale stored loser ID self-heals.
+            book = api_client.get_book(stored_book_id)
+            if not book:
+                log.info('Book %s not found; leaving metadata untouched.'
+                         % stored_book_id)
+                return False
             release_id = pinned_release_id
             if not pinned_release_id:
-                book = api_client.get_book(book_id)
-                if not book or book.get('id') != book_id:
-                    return False
                 release_id = self.select_release(book)
+
+        book_id = book['id']
 
         if release_id:
             release = api_client.get_release(release_id)
-            parent = ((release or {}).get('book') or {}).get('id')
-            if parent != book_id:
-                log.warn('Release %s is unavailable or does not belong to book %s.'
-                         % (release_id, book_id))
+            if release is None:
                 if pinned_release_id:
+                    log.info(
+                        'Pinned release %s not found; leaving metadata '
+                        'untouched (require rematching).' % release_id)
                     return False
-                release = None
+                log.info('Release %s not found; updating work-level '
+                         'metadata only.' % release_id)
                 release_id = None
-
-        if book is None:
-            book = api_client.get_book(book_id)
-            if not book or book.get('id') != book_id:
-                return False
+            else:
+                parent = ((release.get('book') or {}).get('id'))
+                if parent and parent != book_id:
+                    log.warn('Release %s belongs to book %s, not %s.'
+                             % (release_id, parent, book_id))
+                    if pinned_release_id:
+                        return False
+                    release = None
+                    release_id = None
 
         # e. population
         self.native_book_id = book['id']

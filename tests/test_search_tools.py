@@ -676,13 +676,18 @@ class TestAlbumReleasesForBook(unittest.TestCase):
         releases = make_album(FakeMedia()).releases_for_book(book_id)
         self.assertEqual(releases, original)
 
-    def test_mismatched_book_detail_returns_empty(self):
+    def test_merged_book_301_to_winner_returns_winner_releases(self):
+        # A merged book redirects to the canonical winner; the response
+        # carries the winner's id and its releases reference that id, so
+        # the stale stored loser ID must still resolve.
         book = load_fixture('book_detail_WQQDcMBQ3qUT.json')
-        book['id'] = 'otherBook123'
-        book_id = 'WQQDcMBQ3qUT'
-        install_transport({self.detail_url(book_id): (200, api_body(book))})
-        self.assertEqual(
-            make_album(FakeMedia()).releases_for_book(book_id), [])
+        book['id'] = 'winnerBook123'
+        for release in book['releases']:
+            release['book'] = {'id': 'winnerBook123'}
+        loser_id = 'WQQDcMBQ3qUT'
+        install_transport({self.detail_url(loser_id): (200, api_body(book))})
+        releases = make_album(FakeMedia()).releases_for_book(loser_id)
+        self.assertEqual(releases, book['releases'])
 
     def test_release_for_another_book_is_filtered(self):
         book = load_fixture('book_detail_WQQDcMBQ3qUT.json')

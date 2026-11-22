@@ -24,3 +24,7 @@ if sys.version_info[0] >= 3:
         return _raw_loads(s, *args, **kwargs)
 
     _json.loads = _loads
+
+    from urllib.error import HTTPError  # noqa: F401
+else:
+    from urllib2 import HTTPError  # noqa: F401

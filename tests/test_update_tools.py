@@ -225,8 +225,11 @@ class TestAlbumResolveNative(unittest.TestCase):
         tool = make_album('book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
         self.assertFalse(tool.resolve_item())
         self.assertIsNone(tool.native_book_id)
+        # The book detail is fetched to establish the canonical ID,
+        # then the release is validated against it.
         self.assertEqual([req[0] for req in HTTP.requests],
-                         [BASE + '/releases/dPL9fC7YnK8X'])
+                         [BASE + '/books/WQQDcMBQ3qUT',
+                          BASE + '/releases/dPL9fC7YnK8X'])
 
     def test_pinned_release_404_preserved(self):
         install_transport(self._transport())
@@ -236,6 +239,36 @@ class TestAlbumResolveNative(unittest.TestCase):
         self.assertFalse(tool.resolve_item())
         self.assertEqual(meta.id, 'book.WQQDcMBQ3qUT.release.missing123')
         self.assertEqual(meta.title, None)
+
+    def test_merged_book_301_self_heals_stored_loser_id(self):
+        # The stored ID belongs to a merged (loser) book; the detail
+        # endpoint 301s to the canonical winner. The update must proceed
+        # and commit the winner's ID, not fail closed.
+        transport = self._transport()
+        book = load_fixture(BOOK_DETAIL)
+        book['id'] = 'winnerBook123'
+        transport[BASE + '/books/WQQDcMBQ3qUT'] = (200, api_body(book))
+        install_transport(transport)
+        tool = make_album('book.WQQDcMBQ3qUT')
+        self.assertTrue(tool.resolve_item())
+        self.assertEqual(tool.native_book_id, 'winnerBook123')
+
+    def test_merged_book_pinned_release_validates_against_winner(self):
+        # A pinned release on a merged book: the release's parent is
+        # checked against the canonical (winner) book ID from the
+        # redirected detail, not the stale stored ID.
+        transport = self._transport()
+        book = load_fixture(BOOK_DETAIL)
+        book['id'] = 'winnerBook123'
+        transport[BASE + '/books/WQQDcMBQ3qUT'] = (200, api_body(book))
+        release = load_fixture(RELEASE_DETAIL)
+        release['book'] = {'id': 'winnerBook123'}
+        transport[BASE + '/releases/dPL9fC7YnK8X'] = (200, api_body(release))
+        install_transport(transport)
+        tool = make_album('book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        self.assertTrue(tool.resolve_item())
+        self.assertEqual(tool.native_book_id, 'winnerBook123')
+        self.assertEqual(tool.native_release_id, 'dPL9fC7YnK8X')
 
     def test_book_404_preserved(self):
         install_transport({})

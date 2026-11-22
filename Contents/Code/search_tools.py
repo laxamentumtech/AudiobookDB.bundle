@@ -492,15 +492,18 @@ class AlbumSearchTool(SearchTool):
         if not book_id:
             return []
         book = api_client.get_book(book_id, include='releases')
-        if not book or book.get('id') != book_id:
+        if not book:
             return []
+        # A merged book 301s to the canonical winner; releases reference
+        # the winner's id, so the response's id is the comparison key.
+        canonical_id = book.get('id') or book_id
         releases = []
         seen = []
         for release in book.get('releases') or []:
             if not isinstance(release, dict) or not release.get('id'):
                 continue
             release_book_id = (release.get('book') or {}).get('id')
-            if release_book_id and release_book_id != book_id:
+            if release_book_id and release_book_id != canonical_id:
                 continue
             if release['id'] in seen:
                 continue

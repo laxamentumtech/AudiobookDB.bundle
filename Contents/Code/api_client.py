@@ -155,10 +155,16 @@ def request_with_retries(url, method=None, headers=None, data=None):
                 sleep(DEFAULT_RETRY_AFTER)
             continue
 
-        try:
-            status = response.status
-        except AttributeError:
-            status = 200
+        # The status check loads the body exactly once on the lazy
+        # transport; the result is decoded by the caller from the
+        # same response object.
+        status = resolve_response_status(response)[0]
+        if status is None:
+            # Lazy transport with a non-2xx body load that raised no
+            # coded HTTPError: treat as a transport failure.
+            log.error('API status unknown (attempt %d): %s' % (
+                attempt, url))
+            status = 599
         if 200 <= status < 300:
             return response
 
@@ -203,14 +209,24 @@ def location_header(response):
         Returns the response's Location header value (case-insensitive
         keys), or None when absent.
     """
+    # The framework's HTTPHeaderProxy supports indexing and iteration
+    # (lower-cased keys) but no .get(); dict-like shims keep .get().
     try:
-        headers_map = response.headers or {}
+        headers_map = response.headers
+    except Exception:
+        headers_map = None
+    if headers_map is None:
+        return None
+    try:
+        for key in ('location', 'Location', 'LOCATION'):
+            if headers_map.get(key):
+                return headers_map[key]
+        return None
     except AttributeError:
-        headers_map = {}
-    for key in ('location', 'Location', 'LOCATION'):
-        if headers_map.get(key):
-            return headers_map[key]
-    return None
+        for key in headers_map:
+            if str(key).lower() == 'location':
+                return headers_map[key]
+        return None
 
 
 def fetch_bytes(url):
@@ -248,10 +264,10 @@ def fetch_bytes(url):
                 response = None
             if response is None:
                 break
-            try:
-                status = response.status
-            except AttributeError:
-                status = 200
+            status = resolve_response_status(response)[0]
+            if status is None:
+                log.error('Image status unknown: %s' % url)
+                break
             if 200 <= status < 300:
                 # str() yields the raw body: py2 bytes (images) must stay
                 # bytes; a py3 str body is re-encoded. Never UTF-8-encode
@@ -376,15 +392,47 @@ def get_person(person_id):
     return make_request('%s/people/%s' % (BASE_URL, person_id))
 
 
-def response_status(response):
+def http_error_code(error):
     """
-        Returns the response's status code, defaulting to 200 when the
-        transport exposes no .status attribute.
+        The numeric code of a transport HTTP error, or None when the
+        exception carries no code.
     """
     try:
-        return response.status
+        return error.code
     except AttributeError:
-        return 200
+        return None
+
+
+def load_response_body(response):
+    """
+        Loads the response body (Plex's lazy transport loads it on first
+        read) and returns it; the transport's HTTPError propagates on a
+        non-2xx load.
+    """
+    return str(response)
+
+
+def resolve_response_status(response):
+    """
+        The response's effective status: the .status attribute when the
+        transport exposes it, otherwise the HTTPError code a non-2xx
+        body load raises (the lazy path reads the body exactly once and
+        returns it alongside the status for the caller to decode).
+        Returns (status, body-or-None); status is None when the lazy
+        body load succeeded without a .status attribute (treat as 200).
+    """
+    try:
+        return response.status, None
+    except AttributeError:
+        pass
+    try:
+        body = str(response)
+    except Exception as error:
+        code = http_error_code(error)
+        if code is not None:
+            return code, None
+        return None, None
+    return None, body
 
 
 def has_api_key():
@@ -419,15 +467,21 @@ def csrf_cookie_value(response):
         the first ';'-separated segment. A comma fallback covers transports
         that join multiple Set-Cookie values into one header line.
     """
+    # The framework's HTTPHeaderProxy supports indexing and iteration
+    # (lower-cased keys) but no .get(); dict-like shims keep .get().
     try:
-        headers_map = response.headers or {}
-    except AttributeError:
-        headers_map = {}
+        headers_map = response.headers
+    except Exception:
+        headers_map = None
     raw = None
-    for key in ('set-cookie', 'Set-Cookie', 'SET-COOKIE'):
-        if headers_map.get(key):
-            raw = headers_map[key]
-            break
+    if headers_map is not None:
+        try:
+            raw = headers_map.get('set-cookie')
+        except AttributeError:
+            for key in headers_map:
+                if str(key).lower() == 'set-cookie':
+                    raw = headers_map[key]
+                    break
     if not raw:
         return None
     for separator in (';', ','):
@@ -440,15 +494,45 @@ def csrf_cookie_value(response):
     return None
 
 
+def jar_csrf_token():
+    """
+        The csrf_token value Plex's cookie jar already holds for the API
+        origin, or None. After the first prime the jar presents the
+        cookie on later requests, so upstream stops re-setting it — the
+        jar, not the Set-Cookie header, is the source of truth for a
+        re-prime.
+    """
+    try:
+        cookies = HTTP.CookiesForURL(BASE_URL)
+    except Exception:
+        return None
+    if not cookies:
+        return None
+    for cookie in cookies:
+        try:
+            name = cookie.get('name')
+        except AttributeError:
+            # The framework's CookieObject exposes attributes, not .get().
+            name = cookie.name
+        if name == 'csrf_token' and cookie.get('value'):
+            return cookie['value']
+    return None
+
+
 def csrf_prime():
     """
         GETs the same-origin prime URL (single attempt — a failed handshake
-        must stop, not retry) and returns the csrf_token cookie value from
-        the response's Set-Cookie header, or None on any failure.
+        must stop, not retry) and returns the csrf_token value from the
+        response's Set-Cookie header, falling back to the cookie jar (a
+        re-prime carries the jar-held cookie, so upstream sets a fresh
+        one only when the jar is empty), or None on any failure.
 
-        Each prime appends a one-off query param so the transport's GET
-        cache cannot serve a previous prime response (its cookie is the
-        stale one this re-prime exists to replace).
+        The body is loaded first: the framework's lazy transport would
+        otherwise answer a headers-only read with a HEAD request to a
+        GET-only endpoint. Each prime appends a one-off query param so
+        the transport's GET cache cannot serve a previous prime
+        response (its cookie is the stale one this re-prime exists to
+        replace).
     """
     global csrf_prime_count
     csrf_prime_count += 1
@@ -458,10 +542,13 @@ def csrf_prime():
             url, method='GET',
             headers={'User-Agent': USER_AGENT}, timeout=90
         )
+        load_response_body(response)
     except Exception:
         log.error('CSRF prime request failed')
         return None
     token = csrf_cookie_value(response)
+    if not token:
+        token = jar_csrf_token()
     if not token:
         log.error('CSRF prime returned no csrf_token cookie')
     return token
@@ -559,21 +646,31 @@ def search(q, type_, filters=None, include_fields=None):
             return None
         return data
 
-    response = search_post_anonymous(body)
-    if response is None:
-        return None
-    status = response_status(response)
-    if status == 403:
-        # Stale/rotated token: re-prime once and retry once.
-        csrf_invalidate()
+    try:
         response = search_post_anonymous(body)
         if response is None:
             return None
-        status = response_status(response)
-    if not 200 <= status < 300:
-        log.error('Search status %s (anonymous)' % status)
+        status, fetched_body = resolve_response_status(response)
+        if status is None:
+            # Lazy transport 2xx: no .status attribute, body loaded.
+            status = 200
+        if status == 403:
+            # Stale/rotated token: re-prime once and retry once.
+            csrf_invalidate()
+            response = search_post_anonymous(body)
+            if response is None:
+                return None
+            status, fetched_body = resolve_response_status(response)
+            if status is None:
+                status = 200
+        if not 200 <= status < 300:
+            log.error('Search status %s (anonymous)' % status)
+            return None
+        data = decode(fetched_body if fetched_body is not None
+                      else load_response_body(response))
+    except Exception:
+        log.error('Search request failed (anonymous)')
         return None
-    data = decode(str(response))
     if not isinstance(data, list):
         return None
     return data

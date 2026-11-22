@@ -37,12 +37,20 @@ def api_body(payload):
     return json.dumps(payload, ensure_ascii=True)
 
 
-def install_transport(mapping, default=''):
+def install_transport(mapping, default='', lazy=False, jar_script=None):
     """Map URL -> (status, headers, body); records requests on HTTP.requests.
 
     The headers entry may be omitted for a bare (status, body) tuple.
+
+    ``lazy=True`` switches the double to Plex's real HTTPRequest shape
+    (no .status, headers-only reads issue a HEAD, str() raises
+    HTTPError for non-2xx). ``jar_script`` (a list of tokens) makes
+    ``HTTP.CookiesForURL`` return the next scripted token per call,
+    mirroring a cookie jar that reissues the token.
     """
-    def transport(url, method='GET', headers=None, data=None):
+    lazy_default = lazy
+
+    def transport(url, method='GET', headers=None, data=None, lazy=None):
         if url in mapping:
             spec = mapping[url]
         else:
@@ -52,10 +60,26 @@ def install_transport(mapping, default=''):
             resp_headers = {}
         else:
             status, resp_headers, body = spec
-        return _HTTPRequest(status, body, resp_headers)
+        if lazy is None:
+            lazy = lazy_default
+        return _HTTPRequest(status, body, resp_headers, lazy=lazy)
     HTTP.Reset()
     HTTP.Headers = {}
     HTTP.transport = transport
+    if jar_script is not None:
+        script = list(jar_script)
+        state = {'i': 0}
+
+        def scripted_jar(url=None):
+            if state['i'] >= len(script):
+                return []
+            token = script[state['i']]
+            state['i'] += 1
+            if token is None:
+                return []
+            return [{'name': 'csrf_token', 'value': token,
+                     'domain': '', 'path': '/'}]
+        HTTP.CookiesForURL = scripted_jar
     Prefs['logging_level'] = 'ERROR'
     return transport
 
@@ -496,6 +520,8 @@ class TestSearchHandshake(unittest.TestCase):
     def test_stale_token_reprimes_with_cache_bust(self):
         # The transport serves GETs from a URL-keyed cache; the re-prime
         # must bust it with a fresh nonce, not re-read the stale cookie.
+        # The re-prime carries the jar-held cookie, so upstream sets no
+        # fresh Set-Cookie — the new token comes from the cookie jar.
         calls = {'prime': 0}
 
         def transport(url, method='GET', headers=None, data=None):
@@ -505,13 +531,17 @@ class TestSearchHandshake(unittest.TestCase):
                         403, '{"error": "CSRF token validation failed"}')
                 return _HTTPRequest(200, '[]')
             calls['prime'] += 1
-            return _HTTPRequest(
-                200, '{"books": 0}',
-                {'Set-Cookie': 'csrf_token=tok%d; Path=/' % calls['prime']})
+            if calls['prime'] == 1:
+                return _HTTPRequest(
+                    200, '{"books": 0}',
+                    {'Set-Cookie': 'csrf_token=tok1; Path=/'})
+            return _HTTPRequest(200, '{"books": 0}')
 
-        Prefs['api_key'] = ''
-        HTTP.Reset()
-        HTTP.Headers = {}
+        # The first prime reads tok1 from the Set-Cookie header (jar
+        # not consulted). The re-prime carries the jar-held cookie, so
+        # upstream sets no fresh header; the jar yields the reissued
+        # token on its first (and only) consultation.
+        install_transport({}, jar_script=['tok2'])
         HTTP.transport = transport
         self.assertEqual(api_client.search('martian', 'books'), [])
         # Prime, rejected POST, re-prime, accepted POST.
@@ -543,6 +573,35 @@ class TestSearchHandshake(unittest.TestCase):
         install_transport({self.prime_url(): (200, {}, '{"books": 0}')})
         self.assertIsNone(api_client.search('martian', 'books'))
         self.assertEqual(len(HTTP.requests), 1)  # the prime, then stopped
+
+    def test_lazy_double_submit_handshake(self):
+        # Real-transport shape: no .status, HEAD-only headers, str()
+        # loads the body. The prime must read the body (a GET) and the
+        # cookie must be parsed from the proxy-style headers.
+        install_transport({
+            self.prime_url():
+                (200, {'Set-Cookie': 'csrf_token=tok-lazy; Path=/'},
+                      '{"books": 0}'),
+            BASE + '/search': (200, '[]'),
+        }, lazy=True)
+        self.assertEqual(api_client.search('martian', 'books'), [])
+        self.assertEqual(len(HTTP.requests), 2)
+        self.assertEqual(HTTP.requests[0][1], 'GET')
+        self.assertEqual(
+            HTTP.requests[1][2]['X-CSRF-Token'], 'tok-lazy')
+        self.assertEqual(
+            HTTP.requests[1][2]['Cookie'], 'csrf_token=tok-lazy')
+
+    def test_lazy_non_2xx_surfaces_as_none(self):
+        # A rate-limited anonymous POST raises HTTPError on the lazy
+        # body load; search() must return None, not propagate it.
+        install_transport({
+            self.prime_url():
+                (200, {'Set-Cookie': 'csrf_token=tok-lazy; Path=/'},
+                      '{"books": 0}'),
+            BASE + '/search': (429, '{"error": "rate limited"}'),
+        }, lazy=True)
+        self.assertIsNone(api_client.search('martian', 'books'))
 
     def test_prime_transport_failure_returns_none(self):
         def transport(url, method='GET', headers=None, data=None):
