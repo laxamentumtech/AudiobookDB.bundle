@@ -19,7 +19,7 @@ slightly py3-adapted scoring path; the bundle targets python2.7.
 | `metadata_ids.py` | `test_metadata_ids.py` |
 | `search_tools.py` | `test_search_tools.py` |
 | `update_tools.py` | `test_update_tools.py` |
-| (sandbox compliance of every shipped module) | `test_sandbox_compliance.py` (7 tests: underscore-name ban, unavailable-builtin ban, code-dir presence) |
+| (sandbox compliance of every shipped module) | `test_sandbox_compliance.py` (8 tests: restricted names and builtins, augmented assignment rules, code-dir presence) |
 
 ## `test_agent.py` (24 tests) — end-to-end agent flows
 

@@ -27,7 +27,9 @@ except NameError:  # pragma: no cover - python 2 sandbox
 
 log = Logging()
 
-BASE_URL = 'https://audiobookdb.org/api'
+# The documented API origin for external integrations (the apex host
+# remains a compatibility alias); the CSRF prime must run on this host.
+BASE_URL = 'https://api.audiobookdb.org/api'
 USER_AGENT = 'AudiobookDB.bundle/' + version + \
     ' (+https://github.com/laxamentumtech/AudiobookDB.bundle)'
 
@@ -182,8 +184,9 @@ def make_request(url):
         The API key is attached per-request — only this and post_json()
         ever send it, and only to the trusted API origin.
     """
-    response = request_with_retries(
-        url, headers={'X-API-Key': api_key()})
+    key = api_key()
+    headers = {'X-API-Key': key} if key != 'anonymous' else {}
+    response = request_with_retries(url, headers=headers)
     if response is None:
         return None
     return decode(str(response))
@@ -373,12 +376,158 @@ def get_person(person_id):
     return make_request('%s/people/%s' % (BASE_URL, person_id))
 
 
-def search(q, type_, filters=None):
+def response_status(response):
     """
-        POSTs /search with body {'q': q, 'type': type_} plus 'filters' when
-        given. Returns the hit array, or [] on any failure / when the query
-        is shorter than 3 characters with no filters (the API 400s on
-        short q).
+        Returns the response's status code, defaulting to 200 when the
+        transport exposes no .status attribute.
+    """
+    try:
+        return response.status
+    except AttributeError:
+        return 200
+
+
+def has_api_key():
+    """
+        True when a real API key is configured; such requests bypass CSRF
+        validation upstream, so the anonymous handshake is skipped.
+    """
+    return api_key() != 'anonymous'
+
+
+# Prime URL for the anonymous CSRF handshake: the documented
+# /stats endpoint, same origin as the search POST. The upstream sets the
+# host-scoped csrf_token cookie on every GET, so only the Set-Cookie
+# header matters, not the response status.
+CSRF_PRIME_URL = BASE_URL + '/stats'
+
+# Process-lifetime cache of the csrf_token value. A per-call handshake would
+# prime on every search and burn rate budget; the token is re-primed at
+# most once, and only after the server rejects it with a 403.
+csrf_token_cached = None
+# Bumped on every re-prime: the prime GET is cached by URL in the transport,
+# so a stale token must not be read from a cached prime response.
+csrf_prime_count = 0
+
+
+def csrf_cookie_value(response):
+    """
+        Extracts the csrf_token value from a response's Set-Cookie header
+        (case-insensitive key), or None when absent or malformed.
+
+        The header line is "csrf_token=<value>; Path=/; ..." — the value is
+        the first ';'-separated segment. A comma fallback covers transports
+        that join multiple Set-Cookie values into one header line.
+    """
+    try:
+        headers_map = response.headers or {}
+    except AttributeError:
+        headers_map = {}
+    raw = None
+    for key in ('set-cookie', 'Set-Cookie', 'SET-COOKIE'):
+        if headers_map.get(key):
+            raw = headers_map[key]
+            break
+    if not raw:
+        return None
+    for separator in (';', ','):
+        for part in str(raw).split(separator):
+            part = part.strip()
+            if part.startswith('csrf_token='):
+                value = part[len('csrf_token='):]
+                if value:
+                    return value
+    return None
+
+
+def csrf_prime():
+    """
+        GETs the same-origin prime URL (single attempt — a failed handshake
+        must stop, not retry) and returns the csrf_token cookie value from
+        the response's Set-Cookie header, or None on any failure.
+
+        Each prime appends a one-off query param so the transport's GET
+        cache cannot serve a previous prime response (its cookie is the
+        stale one this re-prime exists to replace).
+    """
+    global csrf_prime_count
+    csrf_prime_count += 1
+    url = CSRF_PRIME_URL + '?csrf=1&nonce=%d' % csrf_prime_count
+    try:
+        response = HTTP.Request(
+            url, method='GET',
+            headers={'User-Agent': USER_AGENT}, timeout=90
+        )
+    except Exception:
+        log.error('CSRF prime request failed')
+        return None
+    token = csrf_cookie_value(response)
+    if not token:
+        log.error('CSRF prime returned no csrf_token cookie')
+    return token
+
+
+def csrf_token():
+    """
+        Returns the cached csrf token, priming once on first use.
+    """
+    global csrf_token_cached
+    if csrf_token_cached:
+        return csrf_token_cached
+    csrf_token_cached = csrf_prime()
+    return csrf_token_cached
+
+
+def csrf_invalidate():
+    """
+        Drops the cached csrf token so the next use re-primes.
+    """
+    global csrf_token_cached
+    csrf_token_cached = None
+
+
+def search_post_anonymous(body):
+    """
+        Single anonymous POST of /search carrying the double-submit CSRF
+        token: its value in X-CSRF-Token and the matching Cookie header.
+        No X-API-Key — the literal 'anonymous' is not a valid key and the
+        handshake is what authorizes the request. Returns the raw response,
+        or None on transport failure.
+    """
+    token = csrf_token()
+    if not token:
+        return None
+    headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': USER_AGENT,
+        'X-CSRF-Token': token,
+        'Cookie': 'csrf_token=' + token,
+    }
+    try:
+        return HTTP.Request(
+            BASE_URL + '/search', method='POST', headers=headers,
+            data=json.dumps(body, ensure_ascii=True), timeout=90
+        )
+    except Exception:
+        log.error('Search request failed')
+        return None
+
+
+def search(q, type_, filters=None, include_fields=None):
+    """
+        POSTs /search with body {'q': q, 'type': type_} plus 'filters' and
+        'includeFields' when given. Returns the hit array, [] for a
+        successful empty result, and None on any HTTP, handshake, or
+        response failure. A query shorter than 3 characters with no
+        filters returns [] without a request (the API 400s on short q).
+
+        Anonymous callers handshake first: a same-origin GET primes the
+        host-scoped csrf_token cookie and the POST sends its value in
+        X-CSRF-Token plus the matching Cookie header (double submit). The
+        token is cached per process; after a 403 it is re-primed and the
+        POST retried exactly once, and every other failure stops without
+        repeating the request. A configured API key bypasses CSRF upstream
+        and skips the handshake entirely.
     """
     body = {'type': type_}
     if q:
@@ -391,9 +540,42 @@ def search(q, type_, filters=None):
             return []
     if filters:
         body['filters'] = filters
-    data = post_json('/search', body)
+    if include_fields:
+        # A list/tuple of exact index field names, or a comma-separated
+        # string (the wire form of the same parameter).
+        if not isinstance(include_fields, (list, tuple)):
+            include_fields = str(include_fields).split(',')
+        fields = []
+        for field in include_fields:
+            field = str(field).strip()
+            if field:
+                fields.append(field)
+        if fields:
+            body['includeFields'] = fields
+
+    if has_api_key():
+        data = post_json('/search', body)
+        if not isinstance(data, list):
+            return None
+        return data
+
+    response = search_post_anonymous(body)
+    if response is None:
+        return None
+    status = response_status(response)
+    if status == 403:
+        # Stale/rotated token: re-prime once and retry once.
+        csrf_invalidate()
+        response = search_post_anonymous(body)
+        if response is None:
+            return None
+        status = response_status(response)
+    if not 200 <= status < 300:
+        log.error('Search status %s (anonymous)' % status)
+        return None
+    data = decode(str(response))
     if not isinstance(data, list):
-        return []
+        return None
     return data
 
 

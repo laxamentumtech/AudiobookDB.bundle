@@ -27,20 +27,6 @@ if _CODE_DIR not in sys.path:
 
 import search_tools as _search_tools  # noqa: E402
 
-if sys.version_info[0] >= 3:
-    # Legacy ``ScoreTool.score_album`` encodes the title to bytes (py2 str)
-    # before calling ``reduce_string``; on py3 the ``.replace('-','')`` on
-    # bytes would raise TypeError. Decode bytes back to str first, which is
-    # exactly the py2 semantics (py2 ``str`` *is* bytes).
-    _orig_reduce_string = _search_tools.ScoreTool.reduce_string
-
-    def _reduce_string(self, string):
-        if isinstance(string, bytes):
-            string = string.decode('utf-8')
-        return _orig_reduce_string(self, string)
-
-    _search_tools.ScoreTool.reduce_string = _reduce_string
-
 
 class English(object):
     """Identity token for Locale.Language.English (equal by ==)."""
@@ -72,12 +58,13 @@ Agent.Album = type('Album', (AgentBase,), {})
 
 
 class MetadataSearchResult(object):
-    def __init__(self, id, lang, name, score, year=None):
+    def __init__(self, id, lang, name, score, year=None, thumb=None):
         self.id = id
         self.lang = lang
         self.name = name
         self.score = score
         self.year = year
+        self.thumb = thumb
 
 
 class _Results(object):

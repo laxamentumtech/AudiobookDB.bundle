@@ -4,7 +4,9 @@
 from _version import version
 from logging import Logging
 import api_client
-from search_tools import AlbumSearchTool, ArtistSearchTool, ScoreTool
+from search_tools import (AlbumSearchTool, ArtistSearchTool, ScoreTool,
+                          append_narrator, image_thumb, release_narrator,
+                          release_year)
 import metadata_ids
 from update_tools import AlbumUpdateTool, ArtistUpdateTool
 
@@ -70,10 +72,6 @@ class AudiobookArtist(Agent.Artist):
         # Short circuit search if artist name is bad.
         if not search_helper.media.artist:
             return
-
-        search_helper.media.artist = String.StripDiacritics(
-            search_helper.media.artist
-        )
 
         # Call search API
         result = self.call_search_api(search_helper)
@@ -154,8 +152,7 @@ class AudiobookArtist(Agent.Artist):
             return []
         response = api_client.search(
             body.get('q'), body['type'], body.get('filters'))
-        results_list = helper.parse_api_response(response)
-        return results_list
+        return helper.parse_api_response(response or [])
 
     def process_results(self, helper, result):
         """
@@ -170,7 +167,6 @@ class AudiobookArtist(Agent.Artist):
                 helper,
                 index,
                 info,
-                Locale.Language.English,
                 Util.LevenshteinDistance,
                 result_dict,
             )
@@ -239,104 +235,93 @@ class AudiobookAlbum(Agent.Album):
         search_helper = AlbumSearchTool(
             'books', lang, manual, media, Prefs, results)
 
-        pre_check = search_helper.pre_search_logging()
-        # Purposefully terminate search if it's bad
-        if not pre_check:
-            log.debug("Didn't pass pre-check")
+        # Automatic file IDs can identify an album even when its tags are absent.
+        if not manual and search_helper.check_for_asin():
+            return
+        if not search_helper.pre_search_logging():
+            return
+        # The pre-check copies a typed Fix Match query into media.album.
+        if manual and search_helper.check_for_asin():
             return
 
-        # Check if we can quick match based on ID (native or legacy ASIN).
-        # The helper appends the result itself.
-        if search_helper.check_for_asin():
-            return
-
-        # # Validate author name
         search_helper.validate_author_name()
 
-        # Call search API
-        result = self.call_search_api(search_helper)
-
-        # Write search result status to log
-        if not result:
-            log.warn(
-                'No results found for query "%s"',
-                search_helper.normalizedName
-            )
+        info = self.find_matches(search_helper)
+        if not info:
+            log.warn('No matches for query "%s"', search_helper.normalizedName)
             return
-        log.debug(
-            'Found %s result(s) for query "%s"',
-            len(result),
-            search_helper.normalizedName
-        )
 
-        info = self.process_results(search_helper, result)
+        author_separators = {'de': 'von', 'fr': 'de', 'it': 'di',
+                             'es': 'de', 'ja': u'\u306b\u3088\u308b'}
 
-        # Nested dict for localized separators
-        # 'T_A' is the separator between title and author
-        # 'A_N' is the separator between author and narrator
-        separator_dict = {
-            Locale.Language.English: {'T_A': 'by', 'A_N': 'w/'},
-            'de': {'T_A': 'von', 'A_N': 'mit'},
-            'fr': {'T_A': 'de', 'A_N': 'ac'},
-            'it': {'T_A': 'di', 'A_N': 'con'},
-            'es': {'T_A': 'de', 'A_N': 'con'},
-            'ja': {'T_A': 'による', 'A_N': '読み'},
-        }
-        # Languages the agent advertises without localized separators fall
-        # back to the English wording.
-        local_separators = separator_dict.get(
-            lang, separator_dict[Locale.Language.English])
-        log.debug(
-            'Using localized separators "%s" and "%s"',
-            local_separators['T_A'],
-            local_separators['A_N']
-        )
+        hints = search_helper.recording_hints() if manual else (None, None)
+        for match in info:
+            title = match['title']
+            if len(title) > 36:
+                title = title[:30] + '..'
+            label = '"%s"' % title
+            if match.get('author'):
+                label += ' %s %s' % (
+                    author_separators.get(lang, 'by'),
+                    search_helper.name_to_initials(match['author']))
+            book_id = metadata_ids.parse_metadata_id(match['id'], 'books')[1]
+            releases = search_helper.releases_for_book(book_id) if manual else []
+            if len(releases) == 1:
+                self.append_album_match(search_helper, match, label, releases[0])
+            else:
+                self.append_album_match(search_helper, match, label)
+                if releases:
+                    ranked = sorted(releases, key=lambda release:
+                                    self.recording_rank(release, hints))
+                    # Keep a work-only choice and bound edition rows per hit.
+                    for index, release in enumerate(ranked[:5]):
+                        recording = dict(match)
+                        recording['id'] = metadata_ids.serialize_book_id(
+                            book_id, release['id'])
+                        recording['score'] = match['score'] - (index + 1)
+                        recording_label = '%s [%s]' % (
+                            label, release.get('disambiguation') or index + 1)
+                        self.append_album_match(search_helper, recording,
+                                                recording_label, release)
 
-        # Output the final results.
-        log.separator(log_level="debug")
-        log.debug('Final result:')
-        for i, r in enumerate(info):
-            # Truncate long titles
-            # Displayable chars is ~60 (see issue #32)
-            # Inlcude tolerance to only truncate if >4 chars need to be cut
-            title_trunc = (r['title'][:30] + '..') if len(
-                r['title']) > 36 else r['title']
-
-            # Shorten artist
-            artist_initials = search_helper.name_to_initials(
-                r.get('author') or '')
-            # Shorten narrator
-            narrator_initials = search_helper.name_to_initials(
-                r.get('narrator') or '')
-
-            description = '\"%s\" %s %s %s %s' % (
-                title_trunc,
-                local_separators['T_A'],
-                artist_initials,
-                local_separators['A_N'],
-                narrator_initials
-            )
-            results.Append(
-                MetadataSearchResult(
-                    id=r['id'],
-                    lang=lang,
-                    name=description,
-                    score=r['score'],
-                    year=r.get('year')
-                )
-            )
-
-            """
-                If there are more than one result,
-                and this one has a score that is >= GOOD SCORE,
-                then ignore the rest of the results
-            """
-            if not manual and len(info) > 1 and r['score'] >= GOOD_SCORE:
-                log.info(
-                    '            *** The score for these results are great, '
-                    'so we will use them, and ignore the rest. ***'
-                )
+            if not manual and match['score'] >= GOOD_SCORE:
                 break
+
+    def append_album_match(self, helper, match, label, release=None):
+        thumb = match.get('thumb')
+        narrator = match.get('narrator')
+        year = None
+        if release is not None:
+            narrator = release_narrator(release)
+            year = release_year(release)
+            for image in release.get('images') or []:
+                cover = image_thumb(image)
+                if cover:
+                    thumb = cover
+                    break
+        if narrator:
+            label = append_narrator(label, helper.name_to_initials(narrator),
+                                    helper.lang)
+        helper.results.Append(MetadataSearchResult(
+            id=match['id'], lang=helper.lang, name=label, score=match['score'],
+            thumb=thumb, year=year))
+
+    def recording_rank(self, release, hints):
+        runtime, language = hints
+        name = ((release.get('language') or {}).get('name') or '').strip().lower()
+        language_rank = 1
+        if name and language:
+            language_rank = 0 if name == language.lower() else 2
+        difference = None
+        if runtime:
+            try:
+                hours, minutes, seconds = (release.get('duration') or '').split(':')
+                duration = (int(hours) * 3600 + int(minutes) * 60 + int(seconds)) * 1000
+                if duration > 0:
+                    difference = abs(duration - runtime)
+            except (TypeError, ValueError):
+                pass
+        return (language_rank, difference is None, difference or 0)
 
     def update(self, metadata, media, lang, force):
         """
@@ -362,50 +347,33 @@ class AudiobookAlbum(Agent.Album):
 
         self.compile_metadata(update_helper)
 
-    def call_search_api(self, helper):
-        """
-            Calls the AudiobookDB search API, returns the parsed results
-            to the helper function.
-        """
+    def find_matches(self, helper):
         body = helper.build_search_body()
         if not body:
             return []
-        response = api_client.search(
-            body.get('q'), body['type'], body.get('filters'))
-        results_list = helper.parse_api_response(response)
-        return results_list
+        query = body['q']
+        filters = body.get('filters')
+        response = api_client.search(query, body['type'], filters,
+                                     helper.SEARCH_FIELDS)
+        if response is None:
+            return []
+        matches = self.process_results(helper, helper.parse_api_response(response))
+        # Local credits and catalog spellings do not always agree. Retry the
+        # title once when the author filter leaves no usable match.
+        if not matches and filters and len(query) >= api_client.MIN_QUERY_LENGTH:
+            response = api_client.search(query, body['type'], None,
+                                         helper.SEARCH_FIELDS)
+            matches = self.process_results(
+                helper, helper.parse_api_response(response or []),
+                relaxed_author=True)
+        return matches
 
-    def process_results(self, helper, result):
-        """
-            Process the results from the API call.
-        """
-        # Walk the found items and gather extended information
+    def process_results(self, helper, result, relaxed_author=False):
         info = []
-
-        log.separator(msg="Search results", log_level="info")
         for index, result_dict in enumerate(result):
-            date = self.getDateFromString(result_dict['date'])
-            year = ''
-            if date is not None:
-                year = date.year
-
-            score_helper = ScoreTool(
-                helper,
-                index,
-                info,
-                Locale.Language.English,
-                Util.LevenshteinDistance,
-                result_dict,
-                year
-            )
-            score_helper.run_score_book()
-
-            # Print separators for easy reading
-            if index <= len(result):
-                log.separator(log_level="info")
-
-        info = sorted(info, key=lambda inf: inf['score'], reverse=True)
-        return info
+            ScoreTool(helper, index, info, Util.LevenshteinDistance,
+                      result_dict).run_score_book(relaxed_author)
+        return sorted(info, key=lambda inf: inf['score'], reverse=True)
 
     def compile_metadata(self, helper):
         """
@@ -439,6 +407,8 @@ class AudiobookAlbum(Agent.Album):
                     log.warn('Skipping poster: %s', e)
         # Rating.
         helper.set_metadata_rating()
+        helper.set_metadata_chapters()
+        helper.set_metadata_series_collections()
 
         # Commit the native ID last (after every setter succeeded).
         helper.metadata.id = metadata_ids.serialize_book_id(
@@ -447,13 +417,3 @@ class AudiobookAlbum(Agent.Album):
         # Log the resulting metadata
         helper.log_update_metadata()
 
-    def getDateFromString(self, string):
-        """
-            Converts a string to a date object.
-        """
-        try:
-            return Datetime.ParseDate(string).date()
-        except AttributeError:
-            return None
-        except ValueError:
-            return None

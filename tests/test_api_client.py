@@ -2,7 +2,9 @@
 """
 API client tests: URL construction, headers, JSON decoding, error
 envelopes, 404 handling, 429 Retry-After within the 4-attempt budget, and
-the ASIN/detail/ratings helpers against recorded fixtures.
+the ASIN/detail/ratings helpers against recorded fixtures. Search tests
+cover the anonymous CSRF handshake (same-origin prime, double-submit
+token, bounded retry on 403) and the keyed bypass path.
 """
 
 import json
@@ -19,7 +21,7 @@ import api_client
 # Zero the inter-attempt sleep so failure-path tests are fast.
 api_client.DEFAULT_RETRY_AFTER = 0
 
-BASE = 'https://audiobookdb.org/api'
+BASE = 'https://api.audiobookdb.org/api'
 
 FIXTURES = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'audiobookdb')
@@ -75,18 +77,16 @@ class TestMakeRequest(unittest.TestCase):
         install_transport({BASE + '/x': (200, 'not json')})
         self.assertIsNone(api_client.make_request(BASE + '/x'))
 
-    def test_get_sends_api_key(self):
-        # The configured key rides on GETs, like POSTs do; when the pref is
-        # unset the 'anonymous' fallback is sent.
-        for key, expected in (('test-key', 'test-key'), ('', 'anonymous')):
-            Prefs['api_key'] = key
-            install_transport({BASE + '/x': (200, '{"a": 1}')})
-            self.assertEqual(api_client.make_request(BASE + '/x'), {'a': 1})
-            url, method, headers, data = HTTP.requests[0]
-            # GETs carry no explicit method (None is the GET default).
-            self.assertIn(method, (None, 'GET'))
-            self.assertEqual(headers['X-API-Key'], expected)
-        Prefs['api_key'] = ''
+    def test_get_sends_only_configured_api_key(self):
+        old = Prefs.get('api_key', '')
+        try:
+            for key, expected in (('test-key', {'X-API-Key': 'test-key'}), ('', {})):
+                Prefs['api_key'] = key
+                install_transport({BASE + '/x': (200, '{"a": 1}')})
+                self.assertEqual(api_client.make_request(BASE + '/x'), {'a': 1})
+                self.assertEqual(HTTP.requests[0][2], expected)
+        finally:
+            Prefs['api_key'] = old
 
     def test_error_envelope_returns_none(self):
         install_transport({BASE + '/x': (200, '{"errors": [{"status": "404"}]}')})
@@ -295,19 +295,20 @@ class TestDetailAndGetters(unittest.TestCase):
         self.assertEqual(chips[0]['source'], 'openlibrary')  # not audible
         self.assertEqual(chips[1]['source'], 'audible')
 
-    def test_search_books_fixture(self):
-        hits = load_fixture('search_books_martian.json')
-        install_transport({BASE + '/search': (200, api_body(hits))})
-        out = api_client.search('The Martian', 'books')
-        self.assertEqual(len(out), 10)
-        self.assertEqual(out[1]['id'], 'WQQDcMBQ3qUT')
-
-    def test_search_people_fixture(self):
-        hits = load_fixture('search_people_andy_weir.json')
-        install_transport({BASE + '/search': (200, api_body(hits))})
-        out = api_client.search('Andy Weir', 'people')
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]['id'], 'ypMPwXzWXaiX')
+    def test_search_fixtures_with_api_key(self):
+        old = Prefs.get('api_key', '')
+        Prefs['api_key'] = 'test-key'
+        try:
+            for kind, query, fixture, expected in (
+                ('books', 'The Martian', 'search_books_martian.json', 'WQQDcMBQ3qUT'),
+                ('people', 'Andy Weir', 'search_people_andy_weir.json', 'ypMPwXzWXaiX'),
+            ):
+                hits = load_fixture(fixture)
+                install_transport({BASE + '/search': (200, api_body(hits))})
+                out = api_client.search(query, kind)
+                self.assertIn(expected, [hit['id'] for hit in out])
+        finally:
+            Prefs['api_key'] = old
 
     def test_search_short_q_no_filters_returns_empty(self):
         install_transport({BASE + '/search': (200, '[]')})
@@ -424,6 +425,176 @@ class TestRetryAfter(unittest.TestCase):
             api_client.retry_after_seconds(
                 _HTTPRequest(429, '', {'Retry-After': http_date})),
             api_client.DEFAULT_RETRY_AFTER)
+
+
+class TestSearchHandshake(unittest.TestCase):
+    """Anonymous CSRF handshake and the keyed bypass path for search()."""
+
+    def setUp(self):
+        self._key = Prefs.get('api_key', '')
+        Prefs['api_key'] = ''
+        api_client.csrf_invalidate()
+        api_client.csrf_prime_count = 0
+
+    def tearDown(self):
+        Prefs['api_key'] = self._key
+        api_client.csrf_invalidate()
+
+    def prime_url(self, nonce=1):
+        # csrf_prime appends the one-off cache-bust params.
+        return api_client.CSRF_PRIME_URL + '?csrf=1&nonce=%d' % nonce
+
+    def _assert_double_submit(self):
+        url, method, headers, data = HTTP.requests[1]
+        self.assertEqual(url, BASE + '/search')
+        self.assertEqual(method, 'POST')
+        self.assertEqual(headers['X-CSRF-Token'], 'tok-abc')
+        self.assertEqual(headers['Cookie'], 'csrf_token=tok-abc')
+        self.assertNotIn('X-API-Key', headers)
+
+    def test_anonymous_handshake_sends_double_submit(self):
+        install_transport({
+            self.prime_url():
+                (200, {'Set-Cookie': 'csrf_token=tok-abc; Path=/'},
+                      '{"books": 0}'),
+            BASE + '/search': (200, '[]'),
+        })
+        self.assertEqual(api_client.search('martian', 'books'), [])
+        self.assertEqual(len(HTTP.requests), 2)
+        prime_url, prime_method = HTTP.requests[0][0], HTTP.requests[0][1]
+        # Same-origin prime on the trusted API host, a GET.
+        self.assertEqual(prime_method, 'GET')
+        self.assertTrue(prime_url.startswith(BASE))
+        self._assert_double_submit()
+
+    def test_anonymous_keyed_bypass_skips_prime(self):
+        Prefs['api_key'] = 'test-key'
+        install_transport({BASE + '/search': (200, '[]')})
+        self.assertEqual(api_client.search('martian', 'books'), [])
+        self.assertEqual(len(HTTP.requests), 1)
+        url, method, headers, data = HTTP.requests[0]
+        self.assertEqual(method, 'POST')
+        self.assertEqual(headers['X-API-Key'], 'test-key')
+        self.assertNotIn('X-CSRF-Token', headers)
+        self.assertNotIn('Cookie', headers)
+
+    def test_token_cached_across_calls(self):
+        install_transport({
+            self.prime_url():
+                (200, {'Set-Cookie': 'csrf_token=tok-abc; Path=/'},
+                      '{"books": 0}'),
+            BASE + '/search': (200, '[]'),
+        })
+        api_client.search('martian', 'books')
+        api_client.search('weir', 'people')
+        primes = [r for r in HTTP.requests
+                  if r[1] == 'GET' and r[0].startswith(
+                      api_client.CSRF_PRIME_URL)]
+        # One prime for both searches; the token is cached per process.
+        self.assertEqual(len(primes), 1)
+
+    def test_stale_token_reprimes_with_cache_bust(self):
+        # The transport serves GETs from a URL-keyed cache; the re-prime
+        # must bust it with a fresh nonce, not re-read the stale cookie.
+        calls = {'prime': 0}
+
+        def transport(url, method='GET', headers=None, data=None):
+            if method == 'POST' or url == BASE + '/search':
+                if calls['prime'] == 1:
+                    return _HTTPRequest(
+                        403, '{"error": "CSRF token validation failed"}')
+                return _HTTPRequest(200, '[]')
+            calls['prime'] += 1
+            return _HTTPRequest(
+                200, '{"books": 0}',
+                {'Set-Cookie': 'csrf_token=tok%d; Path=/' % calls['prime']})
+
+        Prefs['api_key'] = ''
+        HTTP.Reset()
+        HTTP.Headers = {}
+        HTTP.transport = transport
+        self.assertEqual(api_client.search('martian', 'books'), [])
+        # Prime, rejected POST, re-prime, accepted POST.
+        self.assertEqual([r[1] for r in HTTP.requests],
+                         ['GET', 'POST', 'GET', 'POST'])
+        self.assertEqual(HTTP.requests[0][0], self.prime_url(1))
+        self.assertNotEqual(HTTP.requests[2][0], self.prime_url(1))
+        self.assertEqual(HTTP.requests[2][0], self.prime_url(2))
+        self.assertEqual(HTTP.requests[3][2]['X-CSRF-Token'], 'tok2')
+        self.assertEqual(HTTP.requests[3][2]['Cookie'], 'csrf_token=tok2')
+
+    def test_403_twice_returns_none(self):
+        install_transport({
+            self.prime_url(1):
+                (200, {'Set-Cookie': 'csrf_token=tok-a; Path=/'},
+                      '{"books": 0}'),
+            self.prime_url(2):
+                (200, {'Set-Cookie': 'csrf_token=tok-b; Path=/'},
+                      '{"books": 0}'),
+            BASE + '/search':
+                (403, '{"error": "CSRF token validation failed"}'),
+        })
+        self.assertIsNone(api_client.search('martian', 'books'))
+        # The POST is made at most twice (one retry) — no loop.
+        posts = [r for r in HTTP.requests if r[1] == 'POST']
+        self.assertEqual(len(posts), 2)
+
+    def test_prime_without_cookie_returns_none(self):
+        install_transport({self.prime_url(): (200, {}, '{"books": 0}')})
+        self.assertIsNone(api_client.search('martian', 'books'))
+        self.assertEqual(len(HTTP.requests), 1)  # the prime, then stopped
+
+    def test_prime_transport_failure_returns_none(self):
+        def transport(url, method='GET', headers=None, data=None):
+            raise IOError('boom')
+        Prefs['api_key'] = ''
+        HTTP.Reset()
+        HTTP.Headers = {}
+        HTTP.transport = transport
+        self.assertIsNone(api_client.search('martian', 'books'))
+        self.assertEqual([r[1] for r in HTTP.requests], ['GET'])
+
+    def test_anonymous_failure_returns_none(self):
+        install_transport({
+            self.prime_url():
+                (200, {'Set-Cookie': 'csrf_token=tok-abc; Path=/'},
+                      '{"books": 0}'),
+        })  # /search falls through to the 404 default
+        self.assertIsNone(api_client.search('martian', 'books'))
+
+    def test_anonymous_malformed_body_returns_none(self):
+        install_transport({
+            self.prime_url():
+                (200, {'Set-Cookie': 'csrf_token=tok-abc; Path=/'},
+                      '{"books": 0}'),
+            BASE + '/search': (200, 'not json'),
+        })
+        self.assertIsNone(api_client.search('martian', 'books'))
+
+    def test_include_fields_list_in_body(self):
+        Prefs['api_key'] = 'test-key'
+        install_transport({BASE + '/search': (200, '[]')})
+        api_client.search(
+            'martian', 'books', None, ['title', 'people.person.name'])
+        payload = json.loads(HTTP.requests[0][3])
+        self.assertEqual(payload['includeFields'],
+                         ['title', 'people.person.name'])
+
+    def test_include_fields_string_split(self):
+        Prefs['api_key'] = 'test-key'
+        install_transport({BASE + '/search': (200, '[]')})
+        api_client.search('martian', 'books', None,
+                          'title, subtitle ,tags')
+        payload = json.loads(HTTP.requests[0][3])
+        self.assertEqual(payload['includeFields'],
+                         ['title', 'subtitle', 'tags'])
+
+    def test_no_include_fields_omitted(self):
+        Prefs['api_key'] = 'test-key'
+        install_transport({BASE + '/search': (200, '[]')})
+        api_client.search('martian', 'books')
+        payload = json.loads(HTTP.requests[0][3])
+        self.assertNotIn('includeFields', payload)
 
 
 if __name__ == '__main__':

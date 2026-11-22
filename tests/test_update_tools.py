@@ -198,25 +198,35 @@ class TestAlbumResolveNative(unittest.TestCase):
         # release detail book.id is authoritative
         self.assertEqual(tool.native_book_id, 'WQQDcMBQ3qUT')
 
-    def test_book_only_selects_lowest_id(self):
+    def test_book_only_with_multiple_editions_stays_work_only(self):
         install_transport(self._transport())
-        # Plain book detail carries no matchedReleaseId; the two-release
-        # list falls back to the lexicographically lowest id.
         tool = make_album('book.WQQDcMBQ3qUT')
         self.assertTrue(tool.resolve_item())
-        self.assertEqual(tool.native_release_id, 'RAffFyqchypK')
+        self.assertIsNone(tool.native_release_id)
+        self.assertFalse([req for req in HTTP.requests if '/releases/' in req[0]])
 
-    def test_selected_release_404_work_only(self):
-        # The selected (lowest, 'RAffFyqchypK') release detail 404s: fall
-        # back to the work-only path rather than pinning a composite ID
-        # that would fail closed on the next update.
-        transport = dict(self._transport())
-        del transport[BASE + '/releases/RAffFyqchypK']
+    def test_single_release_404_stays_work_only(self):
+        transport = self._transport()
+        book = load_fixture(BOOK_DETAIL)
+        book['releases'] = [{'id': 'missing123'}]
+        transport[BASE + '/books/WQQDcMBQ3qUT'] = (200, api_body(book))
         install_transport(transport)
         tool = make_album('book.WQQDcMBQ3qUT')
         self.assertTrue(tool.resolve_item())
         self.assertEqual(tool.native_book_id, 'WQQDcMBQ3qUT')
         self.assertIsNone(tool.native_release_id)
+
+    def test_mismatched_pinned_release_does_not_redirect_book(self):
+        transport = self._transport()
+        release = load_fixture(RELEASE_DETAIL)
+        release['book'] = {'id': 'OtherWork'}
+        transport[BASE + '/releases/dPL9fC7YnK8X'] = (200, api_body(release))
+        install_transport(transport)
+        tool = make_album('book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        self.assertFalse(tool.resolve_item())
+        self.assertIsNone(tool.native_book_id)
+        self.assertEqual([req[0] for req in HTTP.requests],
+                         [BASE + '/releases/dPL9fC7YnK8X'])
 
     def test_pinned_release_404_preserved(self):
         install_transport(self._transport())
@@ -328,41 +338,17 @@ class TestReleaseSelection(unittest.TestCase):
     def _book(self, ids):
         return {'releases': [{'id': i} for i in ids]}
 
-    def test_pinned_wins(self):
-        tool = make_album()
-        self.assertEqual(
-            tool.select_release(self._book(['b', 'a']),
-                                pinned_release_id='b',
-                                matched_release_id='a'),
-            'b')
-
-    def test_matched_wins_over_only_and_lowest(self):
-        tool = make_album()
-        self.assertEqual(
-            tool.select_release(self._book(['z', 'a']),
-                                matched_release_id='z'),
-            'z')
-
     def test_only_release(self):
         tool = make_album()
-        self.assertEqual(
-            tool.select_release(self._book(['only'])), 'only')
+        self.assertEqual(tool.select_release(self._book(['only'])), 'only')
 
-    def test_lowest_id_default(self):
+    def test_multiple_releases_remain_ambiguous(self):
         tool = make_album()
-        self.assertEqual(
-            tool.select_release(self._book(['zzz', 'aaa', 'mmm'])), 'aaa')
+        self.assertIsNone(tool.select_release(self._book(['zzz', 'aaa', 'mmm'])))
 
     def test_no_releases_none(self):
         tool = make_album()
         self.assertIsNone(tool.select_release(self._book([])))
-
-    def test_matched_not_in_releases_falls_through(self):
-        tool = make_album()
-        self.assertEqual(
-            tool.select_release(self._book(['only']),
-                                matched_release_id='ghost'),
-            'only')
 
 
 class TestArtistResolve(unittest.TestCase):

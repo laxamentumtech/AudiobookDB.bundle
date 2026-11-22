@@ -24,30 +24,12 @@ class UpdateTool:
         self.native_release_id = None
         self.native_person_id = None
 
-    def select_release(self, book, pinned_release_id=None,
-                       matched_release_id=None):
-        """
-            Shared release-selection precedence:
-              (1) release pinned in a native ID
-              (2) matchedReleaseId from an ASIN resolve
-              (3) the only release in book['releases']
-              (4) lexicographically lowest release id (deterministic default)
-              (5) None -> work-only path
-            Returns a release id or None.
-        """
+    def select_release(self, book):
         releases = book.get('releases') or []
-        ids = [r['id'] for r in releases]
-        if pinned_release_id and pinned_release_id in ids:
-            return pinned_release_id
-        if matched_release_id and matched_release_id in ids:
-            return matched_release_id
         if len(releases) == 1:
-            return releases[0]['id']
+            return releases[0].get('id')
         if releases:
-            selected = min(ids)
-            log.info('No matched release; defaulting to lowest release ID: %s'
-                     % selected)
-            return selected
+            log.info('Multiple releases; updating work-level metadata only.')
         return None
 
     def getDateFromString(self, string):
@@ -192,65 +174,40 @@ class AlbumUpdateTool(UpdateTool):
                 % (self.metadata.id, self.content_type))
             return False
 
-        book = None
         release = None
-        release_id = None
-
+        pinned_release_id = None
         if kind == 'legacy':
-            # b. legacy ASIN
             asin = self.parsed_id[1]
-            book, matched_release_id = api_client.resolve_asin_book(asin)
+            book, release_id = api_client.resolve_asin_book(asin)
             if book is None:
-                log.info(
-                    'ASIN %s not in AudiobookDB catalog; use Fix Match or '
-                    'add the external link to AudiobookDB.' % asin)
+                log.info('Could not resolve ASIN %s; leaving metadata untouched.'
+                         % asin)
                 return False
-            release_id = self.select_release(
-                book, matched_release_id=matched_release_id)
-            if release_id:
-                release = api_client.get_release(release_id)
-                if release is None:
-                    # A release selected (matched/only/lowest) that is
-                    # unavailable: fall back to the work-only path rather
-                    # than pinning a composite ID that would fail closed.
-                    log.info(
-                        'Release %s not found; updating work-level '
-                        'metadata only.' % release_id)
-                    release_id = None
-        elif kind == 'book':
+            book_id = book['id']
+        else:
             book_id, pinned_release_id = self.parsed_id[1], self.parsed_id[2]
-            if pinned_release_id:
-                # c. book.<id>.release.<id>
-                release = api_client.get_release(pinned_release_id)
-                if release is None:
-                    log.info(
-                        'Release %s not found; leaving metadata untouched '
-                        '(require rematching).' % pinned_release_id)
-                    return False
-                book_id = (release.get('book') or {}).get('id')
+            book = None
+            release_id = pinned_release_id
+            if not pinned_release_id:
                 book = api_client.get_book(book_id)
-                release_id = pinned_release_id
-            else:
-                # d. book.<id>
-                book = api_client.get_book(book_id)
-                if book is None:
-                    log.info(
-                        'Book %s not found; leaving metadata untouched.'
-                        % book_id)
+                if not book or book.get('id') != book_id:
                     return False
                 release_id = self.select_release(book)
-                if release_id:
-                    release = api_client.get_release(release_id)
-                    if release is None:
-                        # A selected (matched/only/lowest) release that
-                        # is unavailable: fall back to the work-only path
-                        # rather than pinning a composite ID that would
-                        # fail closed on the next update.
-                        log.info(
-                            'Release %s not found; updating work-level '
-                            'metadata only.' % release_id)
-                        release_id = None
-            if book is None:
+
+        if release_id:
+            release = api_client.get_release(release_id)
+            parent = ((release or {}).get('book') or {}).get('id')
+            if parent != book_id:
+                log.warn('Release %s is unavailable or does not belong to book %s.'
+                         % (release_id, book_id))
+                if pinned_release_id:
+                    return False
+                release = None
+                release_id = None
+
+        if book is None:
+            book = api_client.get_book(book_id)
+            if not book or book.get('id') != book_id:
                 return False
 
         # e. population
@@ -305,6 +262,9 @@ class AlbumUpdateTool(UpdateTool):
 
         # Series from book['series'][0]/[1].
         series_list = book.get('series') or []
+        self.series_names = [((entry.get('series') or {}).get('title') or '').strip()
+                             for entry in series_list]
+        self.chapters = ((release or {}).get('chapterDetail') or {}).get('chapters') or []
         if len(series_list) > 0:
             entry = series_list[0]
             self.series = (entry.get('series') or {}).get('title')
@@ -433,6 +393,87 @@ class AlbumUpdateTool(UpdateTool):
         tagger.add_series_to_moods()
         # Similar.
         tagger.add_similar()
+
+    def option_enabled(self, key):
+        try:
+            return self.prefs[key] is True
+        except (AttributeError, KeyError):
+            return False
+
+    def set_metadata_series_collections(self):
+        if not self.option_enabled('store_series_as_collection'):
+            return
+        try:
+            collections = self.metadata.collections
+        except AttributeError:
+            return
+        for name in self.series_names:
+            if name:
+                collections.add(name)
+
+    def set_metadata_chapters(self):
+        if (not self.option_enabled('use_chapter_titles') or
+                not self.native_release_id or len(self.chapters) < 2):
+            return
+        tracks = self.chapter_tracks()
+        if len(tracks) != len(self.chapters):
+            return
+        try:
+            chapters = sorted(self.chapters, key=lambda chapter: int(chapter['ordinal']))
+            first = int(chapters[0]['ordinal'])
+            if first not in (0, 1):
+                return
+            offset = 0
+            for position, (track, chapter) in enumerate(zip(tracks, chapters)):
+                start, length = int(chapter['startOffsetMs']), int(chapter['lengthMs'])
+                if (int(chapter['ordinal']) != first + position or start < 0 or
+                        length <= 0 or abs(start - offset) > 2000 or
+                        abs(length - track[2]) > 2000 or
+                        not (chapter.get('title') or '').strip()):
+                    return
+                offset += track[2]
+                if abs(start + length - offset) > 2000:
+                    return
+            metadata_tracks = self.metadata.tracks
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return
+        for track, chapter in zip(tracks, chapters):
+            if self.generic_track_title(track[3]):
+                record = metadata_tracks[track[1]]
+                if self.generic_track_title(record.title):
+                    record.title = chapter['title'].strip()
+
+    def chapter_tracks(self):
+        tracks = []
+        positions = set()
+        paths = set()
+        keys = set()
+        try:
+            for position, track in enumerate(self.media.children):
+                key = track.id or position
+                if len(track.items) != 1 or len(track.items[0].parts) != 1:
+                    return []
+                path = track.items[0].parts[0].file
+                duration = int(track.duration)
+                try:
+                    disc = int(track.parentIndex or 1)
+                except AttributeError:
+                    disc = 1
+                order = (disc, int(track.index))
+                if (not path or duration <= 0 or order[1] < 0 or
+                        order in positions or path in paths or key in keys):
+                    return []
+                tracks.append((order, key, duration, track.title))
+                positions.add(order)
+                paths.add(path)
+                keys.add(key)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return []
+        return sorted(tracks, key=lambda track: track[0])
+
+    def generic_track_title(self, title):
+        return not (title or '').strip() or re.match(
+            r'^\s*(?:chapter|track|part)\s+[0-9]+\s*$', title, re.IGNORECASE)
 
     def set_metadata_title(self):
         """
@@ -677,7 +718,7 @@ class TagTool:
 
     def add_series_to_moods(self):
         """
-            Adds book series' to moods, since collections are not supported
+            Adds book series to Moods independently of collections.
         """
         if self.helper.series:
             self.helper.metadata.moods.add("Series: " + self.helper.series)
