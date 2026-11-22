@@ -147,7 +147,7 @@ There is no separate contributor guide; the essentials:
   ```
 
 - The bundle targets the Python 2.7 Plex sandbox; keep new code py2/py3-compatible.
-- CI (`.github/workflows/test.yml`) runs the suite on Python 3.9/3.11/3.12 plus the Docker py2 job on every push to `develop` and on pull requests. Release tags `v*` run both suites and package `Contents/` into `AudiobookDB.bundle.zip`.
+- CI (`.github/workflows/test.yml`) runs the suite on Python 3.10/3.11/3.12 plus the Docker py2 job on every push to `develop` and on pull requests. Release tags `v*` run both suites and package `Contents/` into `AudiobookDB.bundle.zip`.
 - See [tests/COVERAGE.md](https://github.com/laxamentumtech/AudiobookDB.bundle/blob/develop/tests/COVERAGE.md) for the module-to-test map.
 
 ## Acknowledgements
