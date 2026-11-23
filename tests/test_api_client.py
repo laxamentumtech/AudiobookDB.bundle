@@ -80,6 +80,10 @@ def install_transport(mapping, default='', lazy=False, jar_script=None):
             return [{'name': 'csrf_token', 'value': token,
                      'domain': '', 'path': '/'}]
         HTTP.CookiesForURL = scripted_jar
+    elif 'CookiesForURL' in HTTP.__dict__:
+        # A scripted jar from an earlier test shadows the class method;
+        # drop the instance attribute so the default jar is restored.
+        del HTTP.CookiesForURL
     Prefs['logging_level'] = 'ERROR'
     return transport
 
@@ -185,6 +189,19 @@ class TestFetchBytes(unittest.TestCase):
         })
         self.assertRaises(
             IOError, api_client.fetch_bytes, 'https://cdn.audiobookdb.org/img')
+
+    def test_redirect_without_location_raises(self):
+        # A 3xx hop with no usable Location header cannot be followed:
+        # the hop-by-hop check raises IOError instead of looping.
+        install_transport({
+            'https://cdn.audiobookdb.org/img': (302, {}, ''),
+        }, lazy=True)
+        self.assertRaises(
+            IOError, api_client.fetch_bytes, 'https://cdn.audiobookdb.org/img')
+        # The hop was requested once and nothing was followed.
+        self.assertEqual(
+            [req[0] for req in HTTP.requests],
+            ['https://cdn.audiobookdb.org/img'])
 
     def test_redirect_loop_exhausts_hops(self):
         # Two trusted hops that bounce back to the first URL: the hop limit
@@ -654,6 +671,185 @@ class TestSearchHandshake(unittest.TestCase):
         api_client.search('martian', 'books')
         payload = json.loads(HTTP.requests[0][3])
         self.assertNotIn('includeFields', payload)
+
+
+class TestLazyStatuslessSuccess(unittest.TestCase):
+    """A lazy 2xx (no .status, body loads cleanly) is a success, not 599."""
+
+    def setUp(self):
+        self._key = Prefs.get('api_key', '')
+        Prefs['api_key'] = ''
+        api_client.csrf_invalidate()
+
+    def tearDown(self):
+        Prefs['api_key'] = self._key
+        api_client.csrf_invalidate()
+
+    def test_lazy_detail_get_succeeds(self):
+        install_transport(
+            {BASE + '/books/WQQDcMBQ3qUT': (200, '{"id": "WQQDcMBQ3qUT"}')},
+            lazy=True)
+        self.assertEqual(api_client.make_request(BASE + '/books/WQQDcMBQ3qUT'),
+                         {'id': 'WQQDcMBQ3qUT'})
+        # One attempt: a lazy 2xx must not burn the retry budget.
+        self.assertEqual(len(HTTP.requests), 1)
+
+    def test_lazy_keyed_search_post_succeeds(self):
+        Prefs['api_key'] = 'test-key'
+        install_transport({BASE + '/search': (200, '[{"id": "x"}]')},
+                          lazy=True)
+        self.assertEqual(
+            api_client.post_json('/search', {'q': 'martian', 'type': 'books'}),
+            [{'id': 'x'}])
+        self.assertEqual(len(HTTP.requests), 1)
+
+    def test_lazy_fetch_bytes_succeeds(self):
+        install_transport(
+            {'https://cdn.audiobookdb.org/img': (200, 'JPEG-DATA')},
+            lazy=True)
+        self.assertEqual(
+            api_client.fetch_bytes('https://cdn.audiobookdb.org/img'),
+            b'JPEG-DATA')
+        self.assertEqual(len(HTTP.requests), 1)
+
+
+class TestLazyNon2xxHeaders(unittest.TestCase):
+    """A lazy non-2xx (429, 3xx) must not escape a RuntimeError from a
+    pre-body headers read: the body is loaded before the headers are
+    read, so the retry / IOError contract holds."""
+
+    def setUp(self):
+        self._key = Prefs.get('api_key', '')
+        Prefs['api_key'] = 'test-key'
+
+    def tearDown(self):
+        Prefs['api_key'] = self._key
+
+    def test_lazy_429_retries_with_retry_after(self):
+        # A lazy 429 raises a coded HTTPError on the body load; the
+        # Retry-After header read must happen after that load, and the
+        # request must exhaust its attempts and return None — no
+        # RuntimeError, no uncoded 500.
+        install_transport({
+            BASE + '/books/WQQDcMBQ3qUT':
+                (429, {'Retry-After': '0'}, '{"error": "rate limited"}')
+        }, lazy=True)
+        self.assertIsNone(
+            api_client.make_request(BASE + '/books/WQQDcMBQ3qUT'))
+        self.assertEqual(
+            len(HTTP.requests), api_client.MAX_ATTEMPTS)
+
+    def test_lazy_redirect_follows_location(self):
+        # A lazy 3xx reads the Location header only after the body
+        # load; the followed hop's 2xx body is returned, not an
+        # exception.
+        install_transport({
+            'https://cdn.audiobookdb.org/img':
+                (302, {'Location': 'https://cdn.audiobookdb.org/img/real'},
+                      ''),
+            'https://cdn.audiobookdb.org/img/real':
+                (200, 'JPEG-DATA'),
+        }, lazy=True)
+        self.assertEqual(
+            api_client.fetch_bytes('https://cdn.audiobookdb.org/img'),
+            b'JPEG-DATA')
+        self.assertEqual(
+            [req[0] for req in HTTP.requests],
+            ['https://cdn.audiobookdb.org/img',
+             'https://cdn.audiobookdb.org/img/real'])
+
+    def test_lazy_uncoded_body_failure_retries_to_none(self):
+        # A lazy body load that raises an exception without a .code
+        # (plain IOError / RuntimeError, not a coded HTTPError) leaves
+        # the status unknown: the attempt is treated as a 599 transport
+        # failure and the full retry budget is burned.
+        class _Boom(object):
+            def __str__(self):
+                raise IOError('connection reset')
+
+        def transport(url, method='GET', headers=None, data=None):
+            resp = _HTTPRequest(500, '', {})
+            resp._lazy = True
+            resp._body_loaded = False
+            resp._body = _Boom()
+            return resp
+
+        install_transport({BASE + '/books/WQQDcMBQ3qUT': (500, '')})
+        HTTP.transport = transport
+        self.assertIsNone(
+            api_client.make_request(BASE + '/books/WQQDcMBQ3qUT'))
+        self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
+
+
+class TestJarCsrfToken(unittest.TestCase):
+    def test_attribute_only_cookie_value_read(self):
+        # The framework's CookieObject exposes attributes, not .get().
+        # The name read already had an attribute fallback; the value read
+        # must use the same supported access pattern.
+        class CookieObject(object):
+            name = 'csrf_token'
+            value = 'tok-attr'
+        old = HTTP.CookiesForURL
+        HTTP.CookiesForURL = lambda url=None: [CookieObject()]
+        try:
+            self.assertEqual(api_client.jar_csrf_token(), 'tok-attr')
+        finally:
+            HTTP.CookiesForURL = old
+
+    def test_dict_cookie_value_read(self):
+        old = HTTP.CookiesForURL
+        HTTP.CookiesForURL = lambda url=None: [
+            {'name': 'csrf_token', 'value': 'tok-dict'}]
+        try:
+            self.assertEqual(api_client.jar_csrf_token(), 'tok-dict')
+        finally:
+            HTTP.CookiesForURL = old
+
+    def test_comma_joined_set_cookie_header_value(self):
+        # Some transports join multiple Set-Cookie values into one header
+        # line; the comma fallback must still extract the token.
+        response = _HTTPRequest(
+            200, '{"books": 0}',
+            {'Set-Cookie': 'x=1, csrf_token=tok-c, y=2'})
+        self.assertEqual(api_client.csrf_cookie_value(response), 'tok-c')
+
+
+class TestAnonymousCoded403(unittest.TestCase):
+    """A coded 403 HTTPError raised in flight must reach search()'s
+    re-prime branch, not be swallowed by the blanket except."""
+
+    def setUp(self):
+        self._key = Prefs.get('api_key', '')
+        Prefs['api_key'] = ''
+        api_client.csrf_invalidate()
+        api_client.csrf_prime_count = 0
+
+    def tearDown(self):
+        Prefs['api_key'] = self._key
+        api_client.csrf_invalidate()
+
+    def test_eager_403_reprimes_and_retries(self):
+        from plex_shim import HTTPError
+        calls = {'post': 0}
+
+        def transport(url, method='GET', headers=None, data=None):
+            if method == 'POST':
+                calls['post'] += 1
+                if calls['post'] == 1:
+                    # An eager transport raises its coded HTTPError in
+                    # flight, so there is no response object to return.
+                    raise HTTPError(url, 403, 'Forbidden', None, None)
+                return _HTTPRequest(200, '[]')
+            return _HTTPRequest(200, '{"books": 0}',
+                                {'Set-Cookie': 'csrf_token=tok1; Path=/'})
+
+        install_transport({}, jar_script=['tok2'])
+        HTTP.transport = transport
+        self.assertEqual(api_client.search('martian', 'books'), [])
+        # Prime, rejected POST, re-prime, accepted POST.
+        self.assertEqual([r[1] for r in HTTP.requests],
+                         ['GET', 'POST', 'GET', 'POST'])
+        self.assertEqual(calls['post'], 2)
 
 
 if __name__ == '__main__':

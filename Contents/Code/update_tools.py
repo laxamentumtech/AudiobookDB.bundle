@@ -212,7 +212,16 @@ class AlbumUpdateTool(UpdateTool):
                 release_id = None
             else:
                 parent = ((release.get('book') or {}).get('id'))
-                if parent and parent != book_id:
+                if parent is None:
+                    if pinned_release_id:
+                        # A pinned release must name the canonical book;
+                        # book: null does not confirm membership.
+                        log.warn(
+                            'Pinned release %s does not name the '
+                            'canonical book; leaving metadata untouched '
+                            '(require rematching).' % release_id)
+                        return False
+                elif parent != book_id:
                     log.warn('Release %s belongs to book %s, not %s.'
                              % (release_id, parent, book_id))
                     if pinned_release_id:
@@ -274,7 +283,16 @@ class AlbumUpdateTool(UpdateTool):
         series_list = book.get('series') or []
         self.series_names = [((entry.get('series') or {}).get('title') or '').strip()
                              for entry in series_list]
-        self.chapters = ((release or {}).get('chapterDetail') or {}).get('chapters') or []
+        # A non-mapping chapterDetail (e.g. a bool) or a non-list chapters
+        # value carries no usable chapter data; treat it as absent so an
+        # invalid optional field cannot abort the refresh.
+        chapter_detail = (release or {}).get('chapterDetail')
+        if not isinstance(chapter_detail, dict):
+            chapter_detail = {}
+        chapters = chapter_detail.get('chapters')
+        if not isinstance(chapters, list):
+            chapters = []
+        self.chapters = chapters
         if len(series_list) > 0:
             entry = series_list[0]
             self.series = (entry.get('series') or {}).get('title')
@@ -416,6 +434,11 @@ class AlbumUpdateTool(UpdateTool):
         try:
             collections = self.metadata.collections
         except AttributeError:
+            # The metadata object exposes no collections container: the
+            # preference is set, but there is nowhere to write the series.
+            log.warn('store_series_as_collection is set, but this '
+                     'metadata object has no collections container; '
+                     'series collections were not written.')
             return
         for name in self.series_names:
             if name:
@@ -434,16 +457,19 @@ class AlbumUpdateTool(UpdateTool):
             if first not in (0, 1):
                 return
             offset = 0
+            previous_end = 0
             for position, (track, chapter) in enumerate(zip(tracks, chapters)):
                 start, length = int(chapter['startOffsetMs']), int(chapter['lengthMs'])
                 if (int(chapter['ordinal']) != first + position or start < 0 or
                         length <= 0 or abs(start - offset) > 2000 or
+                        start < previous_end - 2000 or
                         abs(length - track[2]) > 2000 or
                         not (chapter.get('title') or '').strip()):
                     return
                 offset += track[2]
                 if abs(start + length - offset) > 2000:
                     return
+                previous_end = start + length
             metadata_tracks = self.metadata.tracks
         except (AttributeError, KeyError, TypeError, ValueError):
             return

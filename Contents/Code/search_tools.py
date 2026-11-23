@@ -1,4 +1,6 @@
+# -*- coding: utf-8 -*-
 import re
+import unicodedata
 
 # Import internal tools
 from logging import Logging
@@ -47,7 +49,11 @@ def release_year(release):
     value = release.get('releaseDate')
     if not value:
         return None
-    match = YEAR_PREFIX.match(value)
+    try:
+        match = YEAR_PREFIX.match(value)
+    except TypeError:
+        # A non-text releaseDate (e.g. a bare year number) has no year.
+        return None
     if match:
         return int(match.group(1))
     return None
@@ -74,7 +80,11 @@ def image_thumb(image):
 def first_image_thumb(images):
     if not images:
         return None
-    return image_thumb(images[0])
+    for image in images:
+        thumb = image_thumb(image)
+        if thumb:
+            return thumb
+    return None
 
 
 def book_thumb(book):
@@ -545,8 +555,11 @@ class AlbumSearchTool(SearchTool):
             code = stream.languageCode
         except AttributeError:
             code = None
-        if code and code.strip().lower() in STREAM_LANGUAGE_NAMES:
-            return STREAM_LANGUAGE_NAMES[code.strip().lower()]
+        key = None
+        if code:
+            key = code.strip().lower()
+        if key in STREAM_LANGUAGE_NAMES:
+            return STREAM_LANGUAGE_NAMES[key]
         try:
             label = stream.language
         except AttributeError:
@@ -554,7 +567,13 @@ class AlbumSearchTool(SearchTool):
         name = language_name(label)
         if name:
             return name
-        return language_name(code)
+        # A display label carried in the code field (e.g. 'English') is a
+        # usable hint; an unmapped code (e.g. 'und') is not.
+        if key:
+            for name in STREAM_LANGUAGE_NAMES.values():
+                if name.lower() == key:
+                    return name
+        return None
 
     def file_language_name(self):
         """
@@ -628,7 +647,18 @@ class AlbumSearchTool(SearchTool):
             unwanted characters and words.
         """
         input_name = self.media.album or self.media.title or ''
-        name = re.sub(r'\[[^\]]*\]', ' ', input_name)
+
+        def strip_bracket_tag(match):
+            # Keep a bracketed book number (e.g. [Book 2]) as scoring
+            # evidence, unbracketed, so the trailing digit stays visible
+            # to the book-number conflict check; strip every other
+            # bracketed tag (e.g. [2017]).
+            bracket = match.group(0)
+            if re.search(r'\bbook\b', bracket, re.IGNORECASE):
+                return ' ' + bracket.strip('[]') + ' '
+            return ' '
+
+        name = re.sub(r'\[[^\]]*\]', strip_bracket_tag, input_name)
         name = re.sub(r'\(\s*(?:unabridged|abridged|audiobook)\s*\)',
                       ' ', name, flags=re.IGNORECASE)
         name = re.sub(r'\s+audiobook\s*$', '', name, flags=re.IGNORECASE)
@@ -649,17 +679,20 @@ class AlbumSearchTool(SearchTool):
             for credit in item.get('people') or []:
                 if not isinstance(credit, dict):
                     continue
-                person = credit.get('person') or {}
+                person = credit.get('person')
+                role = credit.get('role')
+                if not isinstance(person, dict) or not isinstance(role, dict):
+                    continue
                 name = person.get('name')
-                role = (credit.get('role') or {}).get('name')
+                role_name = role.get('name')
                 if not name:
                     continue
-                if role == 'Author':
+                if role_name == 'Author':
                     author = {'name': name}
                     if person.get('id'):
                         author['id'] = person['id']
                     authors.append(author)
-                elif role == 'Narrator' and not narrator:
+                elif role_name == 'Narrator' and not narrator:
                     narrator = [{'name': name}]
             search_results.append({
                 'book_id': metadata_ids.serialize_book_id(item['id']),
@@ -877,6 +910,19 @@ def match_text(value):
     return re.sub(r'[\W_]+', '', unicode_text(value).lower(), flags=re.UNICODE)
 
 
+def fold_accents(value):
+    """
+        Strips combining marks (NFKD decomposition) so accented and
+        unaccented spellings compare equal in the book-number stem check.
+        The original title is never altered; this is a comparison key only.
+    """
+    text = unicode_text(value)
+    decomposed = unicodedata.normalize('NFKD', text)
+    stripped = [char for char in decomposed
+                if not unicodedata.combining(char)]
+    return u''.join(stripped)
+
+
 def book_number(title):
     title = unicode_text(title)
     match = BOOK_NUMBER.match(title)
@@ -888,19 +934,37 @@ def book_number(title):
     return match_text(title), None
 
 
+def book_number_key(title):
+    """
+        (accent-folded stem, number) for the book-number comparison.
+        Folding is scoped to this key; the title itself is unchanged.
+    """
+    stem, number = book_number(title)
+    return fold_accents(stem), number
+
+
 def conflicts_with_book_number(query, candidate):
     stem, number = book_number(query)
     if not stem or number is None:
         return False
-    title_stem, title_number = book_number(candidate['title'])
-    if title_stem == stem and title_number == number:
+    # The comparison key folds accents so an accented stem (Canción) and
+    # its unaccented spelling (Cancion) match; the raw titles used for the
+    # API request and display are left untouched.
+    query_key = fold_accents(stem)
+    title_key, title_number = book_number_key(candidate['title'])
+    if title_key == query_key and title_number == number:
         return False
 
     # Only use positions for a series named by the input. The first sort
     # ordinal is not enough to decide whether an omnibus includes a book.
     has_conflict = False
     for series in candidate.get('series') or []:
-        if match_text(series.get('title') or '') != stem:
+        # Strip and fold both sides, mirroring the old match_text
+        # comparison: a prefixed series title (The Saga) is the same
+        # series as a bare stem (Saga), and accents are folded.
+        if match_text(
+                fold_accents(book_number_key(
+                    series.get('title') or '')[0])) != query_key:
             continue
         position = series.get('position') or {}
         spans = position.get('spans') or []
@@ -912,7 +976,7 @@ def conflicts_with_book_number(query, candidate):
             has_conflict = True
     if has_conflict:
         return True
-    if title_stem == stem:
+    if title_key == query_key:
         return title_number is not None or number > 1
     return False
 

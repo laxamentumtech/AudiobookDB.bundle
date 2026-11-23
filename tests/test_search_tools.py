@@ -198,6 +198,21 @@ class TestCheckForAsinBooks(unittest.TestCase):
         self.assertFalse(tool.check_for_asin())
         self.assertEqual(tool.results.appended, [])
 
+    def test_release_without_book_rejected(self):
+        # A release detail that omits the book entirely (book: None)
+        # cannot be tied to the book: the mismatch guard rejects it.
+        other_release = load_fixture('release_detail_dPL9fC7YnK8X.json')
+        other_release['book'] = None
+        install_transport({
+            BASE + '/books/WQQDcMBQ3qUT': (
+                200, api_body(load_fixture('book_detail_WQQDcMBQ3qUT.json'))),
+            BASE + '/releases/dPL9fC7YnK8X': (200, api_body(other_release)),
+        })
+        tool = make('books',
+                    FakeMedia(album='book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X'))
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+
     def test_book_404_returns_false(self):
         install_transport({})
         tool = make('books', FakeMedia(album='book.WQQDcMBQ3qUT'))
@@ -551,6 +566,14 @@ class TestNormalizeName(unittest.TestCase):
         tool = make_album(FakeMedia(album=u'Caf\u00e9: An Official Story'))
         self.assertEqual(tool.normalize_name(), u'Caf\u00e9: An Official Story')
 
+    def test_keeps_bracketed_book_number(self):
+        # A bracketed book number is preserved (unbracketed) as scoring
+        # evidence; a non-number tag like [2017] is still stripped.
+        tool = make_album(FakeMedia(album='Saga [Book 2]'))
+        self.assertEqual(tool.normalize_name(), 'Saga Book 2')
+        tool2 = make_album(FakeMedia(album='Saga [2017]'))
+        self.assertEqual(tool2.normalize_name(), 'Saga')
+
 
 class TestAlbumParseApiResponse(unittest.TestCase):
     def test_fixture_hits(self):
@@ -578,6 +601,19 @@ class TestAlbumParseApiResponse(unittest.TestCase):
         ])
         self.assertEqual(results[0]['author'], [])
         self.assertEqual(results[1]['author'], [{'name': 'Ada Doe'}])
+
+    def test_string_role_credit_is_skipped_without_dropping_the_hit(self):
+        # A credit whose role is a bare string (not a mapping) is skipped;
+        # the hit itself is kept, and a later valid credit is still read.
+        tool = make_album(FakeMedia())
+        results = tool.parse_api_response([
+            {'id': 'abc', 'title': 'String Role', 'people': [
+                {'role': 'Author', 'person': {'name': 'Bad Role'}},
+                {'role': {'name': 'Author'}, 'person': {'name': 'Ada Doe'}},
+            ]},
+        ])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['author'], [{'name': 'Ada Doe'}])
 
     def test_missing_required_keys_rejected(self):
         tool = make_album(FakeMedia())
@@ -767,6 +803,21 @@ class TestRecordingHints(unittest.TestCase):
         self.assertEqual(
             make_album(FakeMedia(tree=tree)).recording_hints()[1], 'English')
 
+    def test_unmapped_stream_code_without_label_gives_no_hint(self):
+        # An unmapped code (e.g. 'und') with no usable display label must
+        # not pass the code itself to the ranker.
+        parts = [FakePart('a.mp3', [FakeStream('2', 'und')])]
+        tree = FakeTree(parts=parts)
+        self.assertIsNone(
+            make_album(FakeMedia(tree=tree)).recording_hints()[1])
+
+    def test_display_label_in_code_field_is_a_hint(self):
+        # A display label carried in the code field is a usable hint.
+        parts = [FakePart('a.mp3', [FakeStream('2', 'English')])]
+        tree = FakeTree(parts=parts)
+        self.assertEqual(
+            make_album(FakeMedia(tree=tree)).recording_hints()[1], 'English')
+
 
 class TestImageAndDateHelpers(unittest.TestCase):
     def test_image_thumb_uses_small_derivative(self):
@@ -788,6 +839,26 @@ class TestImageAndDateHelpers(unittest.TestCase):
         self.assertIsNone(release_year({'releaseDate': 'March 2013'}))
         self.assertIsNone(release_year({}))
         self.assertIsNone(release_year(None))
+
+    def test_release_year_non_text_date_is_missing(self):
+        # A non-text releaseDate (e.g. a bare year number) has no year
+        # prefix to match; it is treated as missing, not a TypeError.
+        self.assertIsNone(release_year({'releaseDate': 2020}))
+        self.assertIsNone(release_year({'releaseDate': None}))
+
+    def test_first_image_thumb_skips_unusable_images(self):
+        from search_tools import first_image_thumb
+        # The first image is off-CDN (unusable); the second is a trusted
+        # cover. The first usable image wins, matching the manual path's
+        # "first usable" rule.
+        self.assertEqual(first_image_thumb([
+            {'url': 'https://example.org/a'},
+            {'url': 'https://cdn.audiobookdb.org/b'},
+        ]), 'https://cdn.audiobookdb.org/b/small.jpg')
+        # No usable image at all: the fallback (None) is preserved.
+        self.assertIsNone(first_image_thumb(
+            [{'url': 'https://example.org/a'}, {}]))
+        self.assertIsNone(first_image_thumb([]))
 
 
 class TestArtistSearchToolBody(unittest.TestCase):
@@ -863,7 +934,8 @@ class TestArtistParseApiResponse(unittest.TestCase):
 
 class TestScoreTool(unittest.TestCase):
     def score_book(self, album, title, artist='Ada Doe', authors=None,
-                   manual=False, parent_id=None, author_ids=None, **hit):
+                   manual=False, parent_id=None, author_ids=None,
+                   relaxed_author=False, **hit):
         media = FakeMedia(album=album, artist=artist)
         if parent_id:
             media.parent_metadata = type('PM', (), {'id': parent_id})()
@@ -880,7 +952,7 @@ class TestScoreTool(unittest.TestCase):
         result = helper.parse_api_response([hit])[0]
         info = []
         ScoreTool(helper, 0, info, plex_shim.Util.LevenshteinDistance,
-                  result).run_score_book()
+                  result).run_score_book(relaxed_author)
         return info
 
     def test_subtitle_and_one_coauthor_are_full_match_evidence(self):
@@ -898,6 +970,25 @@ class TestScoreTool(unittest.TestCase):
             self.assertEqual(self.score_book(album, title, manual=True)[0]['id'],
                              'book.abc')
 
+    def test_bracketed_book_number_rejects_unnumbered_same_base(self):
+        # A bracketed book number is preserved through normalization, so an
+        # unnumbered same-base hit conflicts and is skipped (auto search).
+        self.assertEqual(self.score_book('Saga [Book 2]', 'Saga'), [])
+        self.assertEqual(
+            self.score_book('Saga [Book 2]', 'Saga', manual=True)[0]['id'],
+            'book.abc')
+
+    def test_accent_folded_stem_rejects_number_conflict(self):
+        # The comparison key folds accents: an unaccented query stem
+        # (Cancion) matches an accented candidate stem (Canción), so a
+        # differing book number is a conflict.
+        self.assertEqual(self.score_book('Cancion 2', u'Canci\u00f3n 3'), [])
+        # The same stem with the same number is not a conflict; the fold is
+        # scoped to the comparison, so the title Levenshtein keeps its
+        # distance (Cancion vs Canción), yielding 98, not 100.
+        self.assertEqual(
+            self.score_book('Cancion 2', u'Canci\u00f3n 2')[0]['score'], 98)
+
     def test_range_can_cover_query_even_when_first_ordinal_differs(self):
         series = [{'title': 'Saga', 'ordinal': '1', 'position': {
             'status': 'complete', 'spans': [{'start': 1, 'end': 3}],
@@ -905,6 +996,37 @@ class TestScoreTool(unittest.TestCase):
         self.assertEqual(self.score_book('Saga Book 2', 'Saga',
                                          seriesWithId=series)[0]['id'], 'book.abc')
         self.assertEqual(self.score_book('Saga Book 4', 'Saga',
+                                         seriesWithId=series), [])
+
+    def test_prefixed_series_title_resolves_book_number_conflict(self):
+        # A series named by a prefixed title (The Saga) is the same series
+        # as the bare query stem (Saga): the comparison must strip and
+        # fold, not just fold, so the omnibus's span resolves the conflict
+        # and the queried number is not skipped.
+        series = [{'title': 'The Saga', 'ordinal': '1', 'position': {
+            'status': 'complete', 'spans': [{'start': 1, 'end': 3}],
+        }}]
+        self.assertEqual(
+            self.score_book('The Saga Book 2', 'The Saga',
+                            seriesWithId=series)[0]['id'],
+            'book.abc')
+        self.assertEqual(self.score_book('The Saga Book 4', 'The Saga',
+                                         seriesWithId=series), [])
+
+    def test_accented_series_title_resolves_book_number_conflict(self):
+        # The comparison key folds accents on both sides: an unaccented
+        # query stem (Cafe) matches an accented series title (Café), so a
+        # covered span resolves the conflict. The candidate title itself
+        # does not carry the queried number, so only the series span can
+        # save it: a fold-only key (no accent folding, no strip) misses
+        # the accented series and lets the conflict stand.
+        series = [{u'title': u'Caf\u00e9', 'ordinal': '1', 'position': {
+            'status': 'complete', 'spans': [{'start': 1, 'end': 3}],
+        }}]
+        self.assertEqual(self.score_book('Cafe 2', u'Caf\u00e9 Stories',
+                                         seriesWithId=series)[0]['id'],
+                         'book.abc')
+        self.assertEqual(self.score_book('Cafe 4', u'Caf\u00e9 Stories',
                                          seriesWithId=series), [])
 
     def test_literal_title_number_takes_precedence_over_series_position(self):
@@ -955,6 +1077,20 @@ class TestScoreTool(unittest.TestCase):
         self.assertTrue(result[0]['thumb'].endswith('/small.jpg'))
         no_image = self.score_book('Saga', 'Saga')
         self.assertNotIn('thumb', no_image[0])
+
+    def test_relaxed_author_caps_the_name_penalty_at_twenty(self):
+        # The title-only retry re-scores with the author penalty capped at
+        # 20 (manual + relaxed_author): the title is an exact match (0),
+        # the name distance (14, x10) far exceeds the cap, so the capped
+        # score is 100 - 20 - 0 = 80 — while uncapped, 100 - 140 = -40,
+        # below IGNORE_SCORE, so the hit is dropped outright.
+        self.assertEqual(self.score_book(
+            'The Martian Chronicles', 'The Martian Chronicles',
+            artist='Andy Weir', authors=['Xanthique Zephyrium']), [])
+        self.assertEqual(self.score_book(
+            'The Martian Chronicles', 'The Martian Chronicles',
+            artist='Andy Weir', authors=['Xanthique Zephyrium'],
+            manual=True, relaxed_author=True)[0]['score'], 80)
 
 
 if __name__ == '__main__':

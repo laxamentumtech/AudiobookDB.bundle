@@ -158,10 +158,13 @@ def request_with_retries(url, method=None, headers=None, data=None):
         # The status check loads the body exactly once on the lazy
         # transport; the result is decoded by the caller from the
         # same response object.
-        status = resolve_response_status(response)[0]
+        status, body = resolve_response_status(response)
+        if status is None and body is not None:
+            # Lazy transport 2xx: no .status attribute, body loaded.
+            return response
         if status is None:
-            # Lazy transport with a non-2xx body load that raised no
-            # coded HTTPError: treat as a transport failure.
+            # Lazy transport body load that raised no coded HTTPError:
+            # treat as a transport failure.
             log.error('API status unknown (attempt %d): %s' % (
                 attempt, url))
             status = 599
@@ -169,6 +172,14 @@ def request_with_retries(url, method=None, headers=None, data=None):
             return response
 
         if status == 429:
+            # The lazy transport answers a headers-only read with a HEAD
+            # request (RuntimeError) until the body is loaded; load it
+            # first. A coded HTTPError here is the same 429 the status
+            # resolve already saw — never let it mask it.
+            try:
+                load_response_body(response)
+            except Exception:
+                pass
             retry_after = retry_after_seconds(response)
             log.warn('API rate limited, retrying in %d seconds: %s' % (
                 retry_after, url))
@@ -264,7 +275,10 @@ def fetch_bytes(url):
                 response = None
             if response is None:
                 break
-            status = resolve_response_status(response)[0]
+            status, body = resolve_response_status(response)
+            if status is None and body is not None:
+                # Lazy transport 2xx: no .status attribute, body loaded.
+                status = 200
             if status is None:
                 log.error('Image status unknown: %s' % url)
                 break
@@ -283,6 +297,14 @@ def fetch_bytes(url):
             if 300 <= status < 400:
                 if hops >= MAX_IMAGE_REDIRECTS:
                     raise IOError('Too many redirects: ' + str(url))
+                # Same lazy-transport contract as the 429 path: a
+                # headers-only read before the body loads raises
+                # RuntimeError, so load the body first; a coded
+                # HTTPError carries the same 3xx already resolved.
+                try:
+                    load_response_body(response)
+                except Exception:
+                    pass
                 target = location_header(response)
                 if not target:
                     raise IOError('Redirect without Location: ' + url)
@@ -403,6 +425,31 @@ def http_error_code(error):
         return None
 
 
+class CodedHTTPError(object):
+    """
+        A transport HTTP failure that carries a status code but no response
+        object. An eager transport raises its coded HTTPError while the
+        request is in flight, so there is no response to return; this
+        sentinel carries the code so the caller can still observe the
+        status (and re-prime on a 403).
+    """
+
+    def __init__(self, status):
+        self.status = status
+        self.body = ''
+
+
+def coded_http_error_response(error):
+    """
+        A ``CodedHTTPError`` carrying the exception's status code, or None
+        when the exception carries no code.
+    """
+    code = http_error_code(error)
+    if code is None:
+        return None
+    return CodedHTTPError(code)
+
+
 def load_response_body(response):
     """
         Loads the response body (Plex's lazy transport loads it on first
@@ -514,8 +561,15 @@ def jar_csrf_token():
         except AttributeError:
             # The framework's CookieObject exposes attributes, not .get().
             name = cookie.name
-        if name == 'csrf_token' and cookie.get('value'):
-            return cookie['value']
+        if name != 'csrf_token':
+            continue
+        try:
+            value = cookie.get('value')
+        except AttributeError:
+            # The framework's CookieObject exposes attributes, not .get().
+            value = cookie.value
+        if value:
+            return value
     return None
 
 
@@ -595,7 +649,14 @@ def search_post_anonymous(body):
             BASE_URL + '/search', method='POST', headers=headers,
             data=json.dumps(body, ensure_ascii=True), timeout=90
         )
-    except Exception:
+    except Exception as error:
+        # An eager transport raises its coded HTTPError while the request
+        # is in flight, so there is no response to return. Surface the
+        # code as a sentinel so the caller can still observe the status
+        # (and re-prime on a 403).
+        sentinel = coded_http_error_response(error)
+        if sentinel is not None:
+            return sentinel
         log.error('Search request failed')
         return None
 

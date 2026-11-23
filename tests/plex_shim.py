@@ -106,9 +106,12 @@ class _HTTPRequest(object):
     ``.status`` and dict ``.headers``.
 
     ``lazy=True``: mirrors Plex's real HTTPRequest — no ``.status``
-    attribute, ``headers`` is an ``_HTTPHeaderProxy`` (a headers-only
-    read issues a HEAD), and ``str()`` loads the body, raising
-    ``HTTPError`` (with ``.code``) for non-2xx statuses.
+    attribute, ``str()`` loads the body (raising ``HTTPError`` with
+    ``.code`` for non-2xx), and the response's cookies are applied to the
+    jar at that load point. A headers-only read before the body has loaded
+    raises ``RuntimeError`` (the real transport answers it with a HEAD to
+    the endpoint); once the body is loaded, ``headers`` is the
+    ``_HTTPHeaderProxy``.
     """
 
     def __init__(self, status=200, body=None, headers=None, lazy=False):
@@ -116,6 +119,8 @@ class _HTTPRequest(object):
         self._headers = headers or {}
         self._lazy = lazy
         self._url = None
+        self._module = None
+        self._body_loaded = not lazy
         if isinstance(body, bytes):
             body = body.decode('utf-8')
         self._body = body
@@ -126,18 +131,33 @@ class _HTTPRequest(object):
 
     @property
     def headers(self):
-        # The real transport answers a headers-only read with a HEAD.
+        if self._lazy and not self._body_loaded:
+            # A headers-only read before the body loads issues a HEAD to
+            # the endpoint; the GET-only prime endpoint cannot answer it.
+            raise RuntimeError('headers read before body load (HEAD)')
         return self._proxy
 
     @headers.setter
     def headers(self, value):
         self._headers = value
 
+    def body_loaded(self):
+        """True once the body has been read (always for eager responses)."""
+        return self._body_loaded
+
     def __str__(self):
-        if self._lazy and self._status is not None \
-                and not 200 <= self._status < 300:
-            raise HTTPError(self._url or '', self._status,
-                            'HTTP %s' % self._status, self._proxy, None)
+        if self._lazy:
+            if self._status is not None \
+                    and not 200 <= self._status < 300:
+                # The real transport's GET has run: the body is loaded
+                # (the coded HTTPError carries it) even though the read
+                # raises, so a headers read afterwards is legal.
+                self._body_loaded = True
+                raise HTTPError(self._url or '', self._status,
+                                'HTTP %s' % self._status, self._proxy, None)
+            self._body_loaded = True
+            if self._module is not None:
+                self._module._apply_set_cookies(self)
         return self._body or ''
 
 
@@ -175,7 +195,12 @@ class _HTTPModule(object):
         if not isinstance(resp, _HTTPRequest):
             resp = _HTTPRequest(200, resp)
         resp._url = url
-        self._apply_set_cookies(resp)
+        resp._module = self
+        # The real transport applies a response's cookies while loading the
+        # body; an eager response is already loaded, a lazy one applies them
+        # on the first body read (see _HTTPRequest.__str__).
+        if resp.body_loaded():
+            self._apply_set_cookies(resp)
         if cacheable:
             self._cache[url] = resp
         return resp

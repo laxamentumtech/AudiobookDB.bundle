@@ -67,7 +67,7 @@ A refresh populates from AudiobookDB: books appear as albums — title, sort tit
 
 Album title searches keep punctuation and accents. Without a matched parent author ID, the agent tries the title and author name first. It retries by title alone if no filtered result is usable. A matched parent author's native person ID counts as positive evidence even if the author's name differs. The agent skips results that conflict with an explicit book number during automatic matching. Use **Fix Match** to choose a result manually or change an existing pin.
 
-A title match pins the book, not a specific recording. If the book has one visible release, **Fix Match** can show its narrator and a refresh can use its release metadata. For multiple releases, **Fix Match** retains a work-only result and offers up to five selectable recording results. Available local runtime and language guide their ordering, but the agent does not automatically select an edition. Results include cover and year information where known. You can also enter the Audible ASIN or composite native ID for the recording you want.
+A title match pins the book, not a specific recording. If the book has one visible release, **Fix Match** can show its narrator and a refresh can use its release metadata. For multiple releases, **Fix Match** retains a work-only result and offers up to five selectable recording results. Available local runtime and language guide their ordering, but the agent does not automatically select an edition. Results include cover and year information where known.
 
 ## Configuration
 

@@ -58,6 +58,31 @@ class FakeMedia(object):
             setattr(self, key, val)
 
 
+class _FakePart(object):
+    def __init__(self, file_name):
+        self.file = file_name
+
+
+class _FakeItem(object):
+    def __init__(self, parts):
+        self.parts = parts
+
+
+class FakeTrack(object):
+    def __init__(self, index, duration, file_name, title=''):
+        self.id = 'track-%d' % index
+        self.index = index
+        self.duration = duration
+        self.parentIndex = 1
+        self.title = title
+        self.items = [_FakeItem([_FakePart(file_name)])]
+
+
+class FakeTree(object):
+    def __init__(self, tracks):
+        self.children = list(tracks)
+
+
 class FakeMetadata(object):
     def __init__(self, id='book.WQQDcMBQ3qUT'):
         self.id = id
@@ -240,10 +265,10 @@ class TestAlbumResolveNative(unittest.TestCase):
         self.assertEqual(meta.id, 'book.WQQDcMBQ3qUT.release.missing123')
         self.assertEqual(meta.title, None)
 
-    def test_merged_book_301_self_heals_stored_loser_id(self):
+    def test_merged_book_canonical_detail_id_replaces_stored_loser_id(self):
         # The stored ID belongs to a merged (loser) book; the detail
-        # endpoint 301s to the canonical winner. The update must proceed
-        # and commit the winner's ID, not fail closed.
+        # endpoint answers with the canonical winner's payload. The update
+        # must proceed and commit the winner's ID, not fail closed.
         transport = self._transport()
         book = load_fixture(BOOK_DETAIL)
         book['id'] = 'winnerBook123'
@@ -269,6 +294,22 @@ class TestAlbumResolveNative(unittest.TestCase):
         self.assertTrue(tool.resolve_item())
         self.assertEqual(tool.native_book_id, 'winnerBook123')
         self.assertEqual(tool.native_release_id, 'dPL9fC7YnK8X')
+
+    def test_pinned_release_book_null_fails_closed(self):
+        # A pinned release whose detail returns book: null does not name
+        # the canonical book; the update must fail closed, not write the
+        # release's publisher/date/narrator to the book.
+        transport = self._transport()
+        release = load_fixture(RELEASE_DETAIL)
+        release['book'] = None
+        transport[BASE + '/releases/dPL9fC7YnK8X'] = (200, api_body(release))
+        install_transport(transport)
+        meta = FakeMetadata('book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        tool = make_album('book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X',
+                          metadata=meta)
+        self.assertFalse(tool.resolve_item())
+        self.assertIsNone(tool.native_book_id)
+        self.assertEqual(meta.title, None)
 
     def test_book_404_preserved(self):
         install_transport({})
@@ -365,6 +406,18 @@ class TestAlbumParseApiResponse(unittest.TestCase):
         tool = make_album()
         tool.parse_api_response(book, None)
         self.assertEqual(tool.thumb, '')
+
+    def test_non_mapping_chapter_detail_is_no_chapter_data(self):
+        # A release whose chapterDetail is a bool (or whose chapters value
+        # is not a list) carries no usable chapter data; the refresh must
+        # not abort before the chapter preference is checked.
+        book = load_fixture(BOOK_DETAIL)
+        for bad in (True, {'chapters': 'not-a-list'}, {'chapters': None}):
+            release = load_fixture(RELEASE_DETAIL)
+            release['chapterDetail'] = bad
+            tool = make_album()
+            tool.parse_api_response(book, release)
+            self.assertEqual(tool.chapters, [], repr(bad))
 
 
 class TestReleaseSelection(unittest.TestCase):
@@ -662,6 +715,118 @@ class TestAlbumSetters(unittest.TestCase):
             self.assertIn('Existing', tool.metadata.genres)
         finally:
             Prefs['keep_existing_genres'] = False
+
+    def test_set_metadata_series_collections_no_container_logs_warning(self):
+        # The preference is set but the metadata object has no collections
+        # container: the no-op is observable (a warning), not silent.
+        Prefs['store_series_as_collection'] = True
+        try:
+            tool = make_album()
+            tool.set_empty_variables()
+            tool.series_names = ['The Dune Sequence']
+            Prefs['logging_level'] = 'INFO'
+            Log.Clear()
+            tool.set_metadata_series_collections()
+            messages = [entry[1] for entry in Log.entries]
+            self.assertTrue(
+                [m for m in messages if 'collections' in m],
+                messages)
+        finally:
+            Prefs['store_series_as_collection'] = False
+
+    def test_set_metadata_chapters_rejects_out_of_order_sequence(self):
+        # A chapter that starts before the previous chapter's end (the
+        # sequence overlaps) is rejected before any title is written.
+        # The first chapter is longer than its track (within the 2000 ms
+        # length tolerance), so previous_end outruns the cumulative track
+        # offset; the second chapter then starts within 2000 ms of the
+        # offset (passing the offset check) yet more than 2000 ms before
+        # previous_end — only the overlap check rejects it.
+        Prefs['use_chapter_titles'] = True
+        try:
+            tool = make_album()
+            tool.set_empty_variables()
+            tool.native_release_id = 'dPL9fC7YnK8X'
+            tool.chapters = [
+                {'ordinal': 0, 'startOffsetMs': 0, 'lengthMs': 6500,
+                 'title': 'New Chapter 1'},
+                {'ordinal': 1, 'startOffsetMs': 4000, 'lengthMs': 5000,
+                 'title': 'New Chapter 2'},
+            ]
+            # Two 5000 ms tracks with generic titles: a passing sequence
+            # would rewrite them to the chapter titles.
+            tree = FakeTree([
+                FakeTrack(0, 5000, '/lib/01.mp3', title='Track 1'),
+                FakeTrack(1, 5000, '/lib/02.mp3', title='Track 2'),
+            ])
+            tool.media = FakeMedia(children=tree.children)
+            record1 = type('R', (), {'title': 'Track 1'})()
+            record2 = type('R', (), {'title': 'Track 2'})()
+            tool.metadata.tracks = {'track-0': record1, 'track-1': record2}
+            tool.set_metadata_chapters()
+            # No title was written: the overlapping sequence was rejected,
+            # so the generic track titles are left untouched.
+            self.assertEqual(record1.title, 'Track 1')
+            self.assertEqual(record2.title, 'Track 2')
+        finally:
+            Prefs['use_chapter_titles'] = False
+
+    def test_set_metadata_chapters_writes_in_order_sequence(self):
+        # Control: a non-overlapping sequence passes the guard and the
+        # generic titles are rewritten from the chapter titles.
+        Prefs['use_chapter_titles'] = True
+        try:
+            tool = make_album()
+            tool.set_empty_variables()
+            tool.native_release_id = 'dPL9fC7YnK8X'
+            tool.chapters = [
+                {'ordinal': 0, 'startOffsetMs': 0, 'lengthMs': 1000,
+                 'title': 'New 1'},
+                {'ordinal': 1, 'startOffsetMs': 1000, 'lengthMs': 1000,
+                 'title': 'New 2'},
+            ]
+            tree = FakeTree([
+                FakeTrack(0, 1000, '/lib/01.mp3', title='Chapter 1'),
+                FakeTrack(1, 1000, '/lib/02.mp3', title='Chapter 2'),
+            ])
+            tool.media = FakeMedia(children=tree.children)
+            record1 = type('R', (), {'title': 'Chapter 1'})()
+            record2 = type('R', (), {'title': 'Chapter 2'})()
+            tool.metadata.tracks = {'track-0': record1, 'track-1': record2}
+            tool.set_metadata_chapters()
+            self.assertEqual(record1.title, 'New 1')
+            self.assertEqual(record2.title, 'New 2')
+        finally:
+            Prefs['use_chapter_titles'] = False
+
+    def test_set_metadata_chapters_rejects_one_based_ordinals(self):
+        # 1-based numbering (ordinals 2, 3) is in-order and in-sync, but
+        # the first-ordinal guard (first not in (0, 1)) rejects it
+        # silently: no track titles are written.
+        Prefs['use_chapter_titles'] = True
+        try:
+            tool = make_album()
+            tool.set_empty_variables()
+            tool.native_release_id = 'dPL9fC7YnK8X'
+            tool.chapters = [
+                {'ordinal': 2, 'startOffsetMs': 0, 'lengthMs': 1000,
+                 'title': 'New 2'},
+                {'ordinal': 3, 'startOffsetMs': 1000, 'lengthMs': 1000,
+                 'title': 'New 3'},
+            ]
+            tree = FakeTree([
+                FakeTrack(0, 1000, '/lib/01.mp3', title='Chapter 1'),
+                FakeTrack(1, 1000, '/lib/02.mp3', title='Chapter 2'),
+            ])
+            tool.media = FakeMedia(children=tree.children)
+            record1 = type('R', (), {'title': 'Chapter 1'})()
+            record2 = type('R', (), {'title': 'Chapter 2'})()
+            tool.metadata.tracks = {'track-0': record1, 'track-1': record2}
+            tool.set_metadata_chapters()
+            self.assertEqual(record1.title, 'Chapter 1')
+            self.assertEqual(record2.title, 'Chapter 2')
+        finally:
+            Prefs['use_chapter_titles'] = False
 
 
 class TestArtistSetters(unittest.TestCase):
