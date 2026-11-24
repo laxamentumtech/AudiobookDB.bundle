@@ -13,6 +13,7 @@ import plex_shim  # noqa: F401,E402  (framework fakes must load first)
 from plex_shim import Prefs, _Results, _HTTPRequest  # noqa: E402
 
 import api_client  # noqa: E402
+import __init__ as agent  # noqa: E402
 from search_tools import (  # noqa: E402
     SearchTool, AlbumSearchTool, ArtistSearchTool, ScoreTool,
     image_thumb, release_year,
@@ -738,6 +739,20 @@ class TestNormalizeName(unittest.TestCase):
         # part of the work's name and stays in the query.
         tool = make_album(FakeMedia(album='Jackson Vol. 9'))
         self.assertEqual(tool.normalize_name(), 'Jackson Vol. 9')
+
+    def test_keeps_mid_title_volume_marker(self):
+        # A volume marker in the middle of the title is title evidence,
+        # not an edition tag, and stays in the query.
+        tool = make_album(FakeMedia(
+            album='The History (Vol. 1) of the Civil War'))
+        self.assertEqual(
+            tool.normalize_name(),
+            'The History (Vol. 1) of the Civil War')
+
+    def test_strips_curly_braced_volume_marker(self):
+        # Curly braces are a supported bracket form for edition tags.
+        tool = make_album(FakeMedia(album='Saga {Volume 3}'))
+        self.assertEqual(tool.normalize_name(), 'Saga')
 
 
 class TestAlbumParseApiResponse(unittest.TestCase):
@@ -1520,6 +1535,16 @@ class TestSeriesHint(unittest.TestCase):
         self.assertFalse(series_name_in_text('Long Enough Name', None))
         self.assertFalse(series_name_in_text('Long Enough Name', 42))
 
+    def test_non_latin_series_titles_match(self):
+        # Non-Latin letters are letters, not separators, in both Python
+        # versions (a py2 ASCII word class would empty the key).
+        self.assertTrue(series_name_in_text(
+            u'\u0421\u0435\u0440\u0438\u044f \u041f\u0440\u0438\u043a\u043b\u044f\u0434\u0435\u043d\u0438\u0439',
+            u'\u0441\u0435\u0440\u0438\u044f \u043f\u0440\u0438\u043a\u043b\u044f\u0434\u0435\u043d\u0438\u0439 1'))
+        self.assertTrue(series_name_in_text(
+            u'\u30c8\u30a4\u30b9\u30bf\u30fc\u30b0\u30e9\u30f3\u30c9',
+            u'\u30c8\u30a4\u30b9\u30bf\u30fc\u30b0\u30e9\u30f3\u30c9 2'))
+
     def test_supports_number_ordinal_and_position(self):
         self.assertTrue(series_supports_number(
             {'ordinal': 2}, 2))
@@ -1538,6 +1563,11 @@ class TestSeriesHint(unittest.TestCase):
         self.assertIsNone(series_supports_number(
             {'position': {'status': 'partial',
                           'spans': [{'start': 1, 'end': 3}]}}, 2))
+        # A truthy non-iterable span container is unknown, not a crash.
+        self.assertIsNone(series_supports_number(
+            {'position': {'status': 'complete', 'spans': 42}}, 2))
+        self.assertIsNone(series_supports_number(
+            {'position': {'status': 'complete', 'spans': 'x'}}, 2))
         self.assertIsNone(series_supports_number({'ordinal': 2}, None))
 
     def test_eligible_on_name_match(self):
@@ -1598,6 +1628,20 @@ class TestSeriesHint(unittest.TestCase):
         ]}
         self.assertTrue(series_hint_eligible(
             'Everybody Loves Large Chests 1', candidate))
+
+    def test_same_score_tie_uses_title_deduction(self):
+        # Direct gate test: at a base-score tie, the hit with the
+        # smaller title deduction is the better title match, so only
+        # it may earn the boost. End-to-end bases never tie (the score
+        # parity differs per result index), so the tie-break needs a
+        # crafted input.
+        better = {'id': 'book.1', 'score': 90,
+                  'title_deduction': 2, 'series_eligible': True}
+        worse = {'id': 'book.2', 'score': 90,
+                 'title_deduction': 4, 'series_eligible': True}
+        agent.AudiobookAlbum.apply_series_hint([better, worse])
+        self.assertEqual(better['score'], 91)
+        self.assertEqual(worse['score'], 90)
 
 
 if __name__ == '__main__':

@@ -745,12 +745,16 @@ class AlbumSearchTool(SearchTool):
             return None
         return names[0]
 
-    # Bracketed volume markers ((Vol.1), [Volume 3], ...). The search API
-    # treats "Vol. N" in the query as a volume-pattern filter that drops
-    # books cataloged as "Book N" (and "Book N" queries drop "Vol. N"
-    # books), so a volume hint is stripped like any other edition tag
-    # rather than kept as title evidence.
+    # Bracketed volume markers ((Vol.1), [Volume 3], {Volume 3}, ...).
+    # The search API treats "Vol. N" in the query as a volume-pattern
+    # filter that drops books cataloged as "Book N" (and "Book N"
+    # queries drop "Vol. N" books), so a volume hint is stripped like
+    # any other edition tag. Only a trailing marker is an edition tag:
+    # volume text woven into the title (e.g. "The History (Vol. 1) of
+    # the Civil War") is title evidence and stays in the query.
     VOLUME_TAG = r'vol(?:ume)?\.?\s*\d+'
+    VOLUME_MARKER = re.compile(
+        r'[\[\({]\s*' + VOLUME_TAG + r'\s*[\]\)}]\s*\Z', re.IGNORECASE)
 
     def normalize_name(self):
         """
@@ -772,9 +776,7 @@ class AlbumSearchTool(SearchTool):
                 return ' ' + inner + ' '
             return ' '
 
-        volume = re.compile(r'[\[\(]\s*' + self.VOLUME_TAG + r'\s*[\]\)]',
-                            re.IGNORECASE)
-        name = volume.sub(' ', input_name)
+        name = self.VOLUME_MARKER.sub(' ', input_name)
         name = re.sub(r'\[[^\]]*\]', strip_bracket_tag, name)
         name = re.sub(r'\(\s*(?:unabridged|abridged|audiobook)\s*\)',
                       ' ', name, flags=re.IGNORECASE)
@@ -1030,12 +1032,15 @@ def phrase_key(value):
         Accent-folded, lower-cased phrase for whole-token containment:
         separators (punctuation, underscores) become single spaces, so
         'Foo-Bar', 'Foo_Bar' and 'Foo Bar' compare equal while 'Foobar'
-        does not. None when the value is not usable text.
+        does not. Unicode word semantics keep non-Latin letters (Cyrillic,
+        Japanese, ...) as letters in Python 2. None when the value is not
+        usable text.
     """
     text = unicode_text(value)
     if text is None:
         return None
-    return re.sub(r'[\W_]+', ' ', fold_accents(text).lower()).strip()
+    return re.sub(r'[\W_]+', ' ', fold_accents(text).lower(),
+                  flags=re.UNICODE).strip()
 
 
 def fold_accents(value):
@@ -1253,8 +1258,11 @@ def series_supports_number(series, number):
     # A complete position speaks only through its usable spans, mirroring
     # the conflict check: usable spans that miss the number contradict
     # it; an empty or malformed span set is unknown.
+    spans = position.get('spans')
+    if not isinstance(spans, list):
+        return None
     usable = False
-    for span in position.get('spans') or []:
+    for span in spans:
         if not isinstance(span, dict):
             continue
         start = position_number(span.get('start'))
