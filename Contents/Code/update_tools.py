@@ -470,7 +470,7 @@ class AlbumUpdateTool(UpdateTool):
                 start, length = int(chapter['startOffsetMs']), int(chapter['lengthMs'])
                 if (int(chapter['ordinal']) != first + position or start < 0 or
                         length <= 0 or abs(start - offset) > 2000 or
-                        start < previous_end - 2000 or
+                        start < previous_end or
                         abs(length - track[2]) > 2000 or
                         not (chapter.get('title') or '').strip()):
                     return

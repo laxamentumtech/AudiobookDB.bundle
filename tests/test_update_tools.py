@@ -318,12 +318,19 @@ class TestAlbumResolveNative(unittest.TestCase):
         # publisher/date/narrator, and must not pin the unverified
         # release ID.
         transport = self._transport()
+        book = load_fixture(BOOK_DETAIL)
+        book['releases'] = [{'id': 'dPL9fC7YnK8X'}]
+        transport[BASE + '/books/WQQDcMBQ3qUT'] = (200, api_body(book))
         release = load_fixture(RELEASE_DETAIL)
         release['book'] = None
         transport[BASE + '/releases/dPL9fC7YnK8X'] = (200, api_body(release))
         install_transport(transport)
         tool = make_album('book.WQQDcMBQ3qUT')
         self.assertTrue(tool.resolve_item())
+        # The single release was selected, so its detail endpoint was
+        # genuinely requested and the null-parent branch is what ran.
+        self.assertIn(
+            BASE + '/releases/dPL9fC7YnK8X', [req[0] for req in HTTP.requests])
         self.assertEqual(tool.native_book_id, 'WQQDcMBQ3qUT')
         self.assertIsNone(tool.native_release_id)
         # Work-level metadata was populated from the book detail.
@@ -789,6 +796,39 @@ class TestAlbumSetters(unittest.TestCase):
             tool.set_metadata_chapters()
             # No title was written: the overlapping sequence was rejected,
             # so the generic track titles are left untouched.
+            self.assertEqual(record1.title, 'Track 1')
+            self.assertEqual(record2.title, 'Track 2')
+        finally:
+            Prefs['use_chapter_titles'] = False
+
+    def test_set_metadata_chapters_rejects_identical_chapters(self):
+        # Two identical chapters (same start and length) pass the
+        # offset and length checks — the second start is within 2000 ms
+        # of the cumulative track offset — but the second starts before
+        # the first chapter's end: only the overlap check rejects it,
+        # so no title is written.
+        Prefs['use_chapter_titles'] = True
+        try:
+            tool = make_album()
+            tool.set_empty_variables()
+            tool.native_release_id = 'dPL9fC7YnK8X'
+            tool.chapters = [
+                {'ordinal': 0, 'startOffsetMs': 0, 'lengthMs': 1000,
+                 'title': 'New Chapter 1'},
+                {'ordinal': 1, 'startOffsetMs': 0, 'lengthMs': 1000,
+                 'title': 'New Chapter 2'},
+            ]
+            tree = FakeTree([
+                FakeTrack(0, 1000, '/lib/01.mp3', title='Track 1'),
+                FakeTrack(1, 1000, '/lib/02.mp3', title='Track 2'),
+            ])
+            tool.media = FakeMedia(children=tree.children)
+            record1 = type('R', (), {'title': 'Track 1'})()
+            record2 = type('R', (), {'title': 'Track 2'})()
+            tool.metadata.tracks = {'track-0': record1, 'track-1': record2}
+            tool.set_metadata_chapters()
+            # No title was written: the overlapping sequence was
+            # rejected, so the generic track titles are left untouched.
             self.assertEqual(record1.title, 'Track 1')
             self.assertEqual(record2.title, 'Track 2')
         finally:

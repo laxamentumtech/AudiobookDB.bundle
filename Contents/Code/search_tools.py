@@ -652,10 +652,13 @@ class AlbumSearchTool(SearchTool):
             # Keep a bracketed book number (e.g. [Book 2]) as scoring
             # evidence, unbracketed, so the trailing digit stays visible
             # to the book-number conflict check; strip every other
-            # bracketed tag (e.g. [2017], [Book Club]).
+            # bracketed tag (e.g. [2017], [Book Club],
+            # [Book 2 - Unabridged] — a mixed tag is not a pure
+            # book-number tag).
             bracket = match.group(0)
-            if re.search(r'\bbook\s+\d+', bracket, re.IGNORECASE):
-                return ' ' + bracket.strip('[]') + ' '
+            inner = bracket.strip('[]')
+            if re.match(r'\s*book\s+\d+\s*$', inner, re.IGNORECASE):
+                return ' ' + inner + ' '
             return ' '
 
         name = re.sub(r'\[[^\]]*\]', strip_bracket_tag, input_name)

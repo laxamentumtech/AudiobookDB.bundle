@@ -768,9 +768,10 @@ class TestLazyNon2xxHeaders(unittest.TestCase):
                 raise IOError('connection reset')
 
         def transport(url, method='GET', headers=None, data=None):
-            resp = _HTTPRequest(500, '', {})
-            resp._lazy = True
-            resp._body_loaded = False
+            # lazy=True from construction: no .status attribute, so the
+            # status resolver is forced through the body-read path where
+            # _Boom's str() raises the uncoded IOError.
+            resp = _HTTPRequest(200, '', {}, lazy=True)
             resp._body = _Boom()
             return resp
 

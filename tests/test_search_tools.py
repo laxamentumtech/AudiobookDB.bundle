@@ -582,6 +582,15 @@ class TestNormalizeName(unittest.TestCase):
         tool2 = make_album(FakeMedia(album='Saga [Books 1\u20133]'))
         self.assertEqual(tool2.normalize_name(), 'Saga')
 
+    def test_strips_mixed_book_bracket(self):
+        # A bracket mixing a book number with other text
+        # ([Book 2 - Unabridged]) is not a pure book-number tag: it is
+        # stripped entirely, while a pure [Book 2] is still preserved.
+        tool = make_album(FakeMedia(album='Saga [Book 2 - Unabridged]'))
+        self.assertEqual(tool.normalize_name(), 'Saga')
+        tool2 = make_album(FakeMedia(album='Saga [Book 2]'))
+        self.assertEqual(tool2.normalize_name(), 'Saga Book 2')
+
 
 class TestAlbumParseApiResponse(unittest.TestCase):
     def test_fixture_hits(self):
