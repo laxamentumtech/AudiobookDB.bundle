@@ -720,39 +720,60 @@ class TestNormalizeName(unittest.TestCase):
         tool2 = make_album(FakeMedia(album='Saga [Book 2]'))
         self.assertEqual(tool2.normalize_name(), 'Saga Book 2')
 
-    def test_strips_bracketed_volume_marker(self):
-        # The search API filters on a "Vol. N" pattern in the query and
-        # drops books cataloged as "Book N" (and vice versa), so a
-        # bracketed volume hint is stripped like an edition tag.
+    def test_unbrackets_trailing_volume_marker(self):
+        # A trailing bracketed volume marker is unbracketed: the volume
+        # text is scoring evidence for local matching, and the API query
+        # (build_search_body) drops it.
         tool = make_album(FakeMedia(
             album='Morningwood: Everybody Loves Large Chests (Vol.1)'))
         self.assertEqual(
             tool.normalize_name(),
-            'Morningwood: Everybody Loves Large Chests')
+            'Morningwood: Everybody Loves Large Chests Vol.1')
         tool2 = make_album(FakeMedia(album='Saga [Volume 3]'))
-        self.assertEqual(tool2.normalize_name(), 'Saga')
-        tool3 = make_album(FakeMedia(album='Saga [vol 2]'))
-        self.assertEqual(tool3.normalize_name(), 'Saga')
+        self.assertEqual(tool2.normalize_name(), 'Saga Volume 3')
+        tool3 = make_album(FakeMedia(album='Saga {Volume 3}'))
+        self.assertEqual(tool3.normalize_name(), 'Saga Volume 3')
 
     def test_keeps_unbracketed_volume_in_title(self):
-        # A volume marker woven into the title (not an edition tag) is
-        # part of the work's name and stays in the query.
+        # A volume marker woven into the title (not a trailing edition
+        # tag) is part of the work's name and stays.
         tool = make_album(FakeMedia(album='Jackson Vol. 9'))
         self.assertEqual(tool.normalize_name(), 'Jackson Vol. 9')
 
     def test_keeps_mid_title_volume_marker(self):
         # A volume marker in the middle of the title is title evidence,
-        # not an edition tag, and stays in the query.
+        # not an edition tag, and stays (brackets unbracketed).
         tool = make_album(FakeMedia(
             album='The History (Vol. 1) of the Civil War'))
         self.assertEqual(
             tool.normalize_name(),
             'The History (Vol. 1) of the Civil War')
+        tool2 = make_album(FakeMedia(
+            album='The History [Vol. 1] of the Civil War'))
+        self.assertEqual(
+            tool2.normalize_name(),
+            'The History Vol. 1 of the Civil War')
 
-    def test_strips_curly_braced_volume_marker(self):
-        # Curly braces are a supported bracket form for edition tags.
-        tool = make_album(FakeMedia(album='Saga {Volume 3}'))
-        self.assertEqual(tool.normalize_name(), 'Saga')
+    def test_query_drops_trailing_volume_marker(self):
+        # The API query strips the trailing volume text (bracketed or
+        # unbracketed) so the API's volume-pattern filter does not hide
+        # "Book N" entries.
+        tool = make_album(FakeMedia(
+            album='Morningwood: Everybody Loves Large Chests (Vol.1)'))
+        body = tool.build_search_body()
+        self.assertEqual(
+            body['q'], 'Morningwood: Everybody Loves Large Chests')
+        tool2 = make_album(FakeMedia(album='Saga [Volume 3]'))
+        self.assertEqual(tool2.build_search_body()['q'], 'Saga')
+        tool3 = make_album(FakeMedia(album='Saga Vol. 3'))
+        self.assertEqual(tool3.build_search_body()['q'], 'Saga')
+
+    def test_query_keeps_mid_title_volume_marker(self):
+        tool = make_album(FakeMedia(
+            album='The History (Vol. 1) of the Civil War'))
+        self.assertEqual(
+            tool.build_search_body()['q'],
+            'The History (Vol. 1) of the Civil War')
 
 
 class TestAlbumParseApiResponse(unittest.TestCase):
@@ -1487,6 +1508,28 @@ class TestScoreTool(unittest.TestCase):
             manual=True, relaxed_author=True)[0]['score'], 80)
 
 
+class TestScoreAlbumGuard(unittest.TestCase):
+    def _tool(self, album):
+        helper = make_album(FakeMedia(album=album))
+        helper.build_search_body()
+        return ScoreTool(helper, 0, [], plex_shim.Util.LevenshteinDistance,
+                         {'id': 'abc'})
+
+    def test_numeric_title_with_subtitle_does_not_raise(self):
+        # A catalog title may arrive as a JSON number; the subtitle
+        # concatenation must not raise. '1984' vs 1984 is a 4-character
+        # distance (the '1' is read as a book number), so 8 points.
+        self.assertEqual(self._tool('1984').score_album('1984', 1984), 8)
+        self._tool('1984').score_album('1984', 1984, subtitle='Reissue')
+
+    def test_text_title_with_subtitle_uses_both(self):
+        tool = self._tool('The Wall')
+        # The subtitle path lowers the distance when it matches.
+        self.assertLess(
+            tool.score_album('The Wall', 'The', subtitle='Wall'),
+            tool.score_album('The Wall', 'The'))
+
+
 class TestSeriesHint(unittest.TestCase):
     """Fix Match series-name hint: matching, eligibility, robustness."""
 
@@ -1589,6 +1632,41 @@ class TestSeriesHint(unittest.TestCase):
         # The album name asks for volume 1; the membership says volume 2.
         self.assertFalse(series_hint_eligible(
             'Everybody Loves Large Chests 1', candidate))
+
+    def test_bracketed_volume_number_contradicts_the_hint(self):
+        # The motivating form: the name carries its number only as a
+        # trailing bracketed volume marker, so book_number finds none.
+        candidate = {'series': [
+            {'title': 'Everybody Loves Large Chests',
+             'position': {'status': 'complete',
+                          'spans': [{'start': 2, 'end': 2}]}}
+        ]}
+        self.assertFalse(series_hint_eligible(
+            'Everybody Loves Large Chests (Vol.1)', candidate))
+        self.assertFalse(series_hint_eligible(
+            'Everybody Loves Large Chests [Volume 1]', candidate))
+        # A supporting marker grants the hint.
+        candidate2 = {'series': [
+            {'title': 'Everybody Loves Large Chests',
+             'position': {'status': 'complete',
+                          'spans': [{'start': 1, 'end': 1}]}}
+        ]}
+        self.assertTrue(series_hint_eligible(
+            'Everybody Loves Large Chests (Vol.1)', candidate2))
+
+    def test_all_matching_memberships_are_checked(self):
+        # A contradiction later in the list still withholds the hint, in
+        # either order.
+        match = {'title': 'Everybody Loves Large Chests'}
+        conflict = {'title': 'Everybody Loves Large Chests',
+                    'position': {'status': 'complete',
+                                 'spans': [{'start': 2, 'end': 2}]}}
+        self.assertFalse(series_hint_eligible(
+            'Everybody Loves Large Chests 1',
+            {'series': [match, conflict]}))
+        self.assertFalse(series_hint_eligible(
+            'Everybody Loves Large Chests 1',
+            {'series': [conflict, match]}))
 
     def test_unknown_position_never_withholds(self):
         candidate = {'series': [

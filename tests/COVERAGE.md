@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 374 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 403 tests, 0 network.
 
 The test transport double (`tests/plex_shim.py`) has two modes: an
 eager default, and a `lazy=True` mode that mirrors Plex's real
@@ -25,12 +25,12 @@ contract is what gets exercised.
 | `update_tools.py` | `test_update_tools.py` |
 | (sandbox compliance of every shipped module) | `test_sandbox_compliance.py` (8 tests: restricted names and builtins, augmented assignment rules, code-dir presence) |
 
-## `test_agent.py` (39 tests) — end-to-end agent flows
+## `test_agent.py` (44 tests) — end-to-end agent flows
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestStartAndIdentity` | 4 | `Start`, `ValidatePrefs`, `getDateFromString`, agent name/prefix constants |
-| `TestAlbumSearch` | 15 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all), manual edition rows (work-only + up to 5 ranked recordings with release cover/year), complete narrator lists on search hits and release rows, explicit count within the 60-character budget, work-only rows narrator-free beside editions while plain hits keep book-level narrators, edition discriminators preserved in identical recording rows |
+| `TestAlbumSearch` | 20 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all), manual edition rows (work-only + up to 5 ranked recordings with release cover/year), complete narrator lists on search hits and release rows, explicit count within the 60-character budget, work-only rows narrator-free beside editions while plain hits keep book-level narrators, edition discriminators preserved in identical recording rows, Fix Match series-name hint (lift into a gap, title-rank preserved on a real base tie, 100 cap, base-snapshot staircase, auto untouched) |
 | `TestAlbumQuickMatch` | 3 | `search` ASIN quick-match: album/filename ASIN → single 100-point result; unresolvable ASIN falls through |
 | `TestAlbumUpdate` | 9 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only), forced update with empty/null description keeps the existing summary and still writes title/studio/styles/native ID |
 | `TestArtistSearchAndUpdate` | 8 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID; same-name people stay distinct and show their disambiguation |
@@ -71,7 +71,7 @@ contract is what gets exercised.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (141 tests)
+## `test_search_tools.py` (165 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -83,7 +83,7 @@ contract is what gets exercised.
 | `TestAlbumParentAuthor` | 6 | parent author ID wiring: matched native person ID as evidence, mismatch/absence tolerated |
 | `TestNameToInitials` | 5 | `name_to_initials`: full names, already abbreviated, multi-word |
 | `TestNarratorDisplay` | 11 | `format_narrators`/`narrator_label`: complete list when it fits, explicit `+N` remaining count, count-only output when no full name fits, base-label shortening, edition-suffix reservation, bounded no-narrator labels including an overlong suffix, `+1` fallback for an overlong single narrator even with distinct editions, and title retention for an intermediate-length name beside an edition |
-| `TestNormalizeName` | 6 | `normalize_name`: brackets/specials/words stripped, album→title fallback, diacritics, bracketed book number preserved (unbracketed) while non-number and mixed tags are stripped |
+| `TestNormalizeName` | 11 | `normalize_name`: brackets/specials/words stripped, album→title fallback, diacritics, bracketed book number preserved (unbracketed) while non-number and mixed tags are stripped, trailing bracketed volume marker unbracketed (kept for scoring) and dropped from the API query, mid-title and unbracketed volume text preserved |
 | `TestAlbumParseApiResponse` | 7 | album `parse_api_response`: fixture hits, missing required keys, non-dict items, no narrator role, string-role credit skipped without dropping the hit, all narrator credits retained, name-only author credits kept without invented IDs |
 | `TestPreSearchLogging` | 5 | `pre_search_logging`: missing album → track title, unknown album → `None`, manual |
 | `TestAlbumReleasesForBook` | 5 | `releases_for_book`: original dicts returned, duplicate IDs deduped, merged-book 301 to winner resolved, release for another book filtered, failure/empty → `[]` |
@@ -94,6 +94,8 @@ contract is what gets exercised.
 | `TestArtistMultiArtist` | 5 | `find_non_contributor`, `handle_multi_artist`, `get_primary_author` |
 | `TestArtistParseApiResponse` | 3 | artist `parse_api_response`: fixture, disambiguation parsed, missing keys rejected |
 | `TestScoreTool` | 27 | scoring: subtitle + coauthor full-match evidence, four same-base wrong-volume targets available only in Fix Match, bracketed book number rejects an unnumbered same base (auto), accent-folded stem rejects a number conflict (comparison path only), prefixed/accented series title resolves a book-number conflict, ranged and disjoint-set series positions, legacy ordinal only when position is missing, explicit unknown/partial positions abstain for unnumbered titles but do not hide a same-stem title-number conflict, partial coverage is never support, fractional and non-finite ordinals/spans abstain, malformed/reversed spans are not contradictions, literal title number precedence, unrelated series/edition numbers tolerated, unrelated title numbers do not override membership, bare title + wrong author rejected, parent author ID evidence (match/mismatch/absence), relaxed author caps the name penalty at twenty, thumb carried without score change, complete narrator list retained, name-only author credit still scores, disambiguation is display-only |
+| `TestScoreAlbumGuard` | 2 | `score_album`: a numeric catalog title with a subtitle does not raise (text-only concatenation), the subtitle path still lowers the distance for text titles |
+| `TestSeriesHint` | 17 | Fix Match series-name hint: whole-token phrase matching (accents, case, punctuation/underscores as separators, token boundaries, min length, non-Latin), position support/contradiction/unknown, a trailing bracketed volume marker as the requested number, all matching memberships checked, malformed memberships and non-list containers degrade, direct tie-break gate |
 
 ## `test_update_tools.py` (86 tests)
 

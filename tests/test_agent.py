@@ -648,11 +648,18 @@ class TestAlbumSearch(unittest.TestCase):
     def test_manual_series_hint_never_changes_title_ranking(self):
         # A worse-title hit at the same base score must not overtake a
         # better-title hit, even when only the worse hit is eligible.
+        # A real base-score tie: the eligible one-edit hit at index 0
+        # (100 - 2 = 98) and the exact hit at index 2 (100 - 0 - 2 = 98)
+        # both score 98. The exact hit has the smaller title deduction,
+        # so the tie-break withholds the boost. An unconditional bonus
+        # would lift the eligible hit to 99 and let it overtake.
         hits = [
-            dict(self._hit_without_narrator('aaaaaaaaaaaa', 'Saga One'),
-                 seriesWithId=[{'title': 'Unrelated Series'}]),
-            dict(self._hit_without_narrator('bbbbbbbbbbbb', 'Saga One X'),
+            dict(self._hit_without_narrator('aaaaaaaaaaaa', 'Saga One X'),
                  seriesWithId=[{'title': 'Saga One'}]),
+            dict(self._hit_without_narrator('cccccccccccc', 'Saga One XYZ'),
+                 seriesWithId=[{'title': 'Unrelated Series'}]),
+            dict(self._hit_without_narrator('bbbbbbbbbbbb', 'Saga One'),
+                 seriesWithId=[{'title': 'Unrelated Series'}]),
         ]
         install_transport(hits)
         results = _Results()
@@ -660,10 +667,11 @@ class TestAlbumSearch(unittest.TestCase):
             results, album_media(album='Saga One'),
             plex_shim.Locale.Language.English, True)
         scores = {r.id: r.score for r in results.appended}
-        # 'Saga One X' is one edit (2 points) from the query: strictly
-        # below, never equalized by the hint.
-        self.assertLess(scores['book.bbbbbbbbbbbb'],
-                        scores['book.aaaaaaaaaaaa'])
+        self.assertEqual(scores['book.aaaaaaaaaaaa'], 98)
+        self.assertEqual(scores['book.bbbbbbbbbbbb'], 98)
+        # The worse-title (eligible) hit stays at or below the exact hit.
+        self.assertLessEqual(scores['book.aaaaaaaaaaaa'],
+                             scores['book.bbbbbbbbbbbb'])
 
     def test_manual_series_hint_capped_at_100(self):
         # A perfect-title hit below 100 only because of index/author
