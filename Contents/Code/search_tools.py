@@ -46,6 +46,12 @@ VOLUME_MARKER = re.compile(
 QUERY_VOLUME = re.compile(
     r'[\[\({]\s*' + VOLUME_TAG + r'\s*[\]\)}]\s*\Z|\s+' + VOLUME_TAG
     + r'\s*\Z', re.IGNORECASE)
+# A bare trailing volume number ("... Vol. 1"): the query cleanup strips
+# it, so the hint's contradiction check reads it from the raw name when
+# book_number finds none (book_number deliberately ignores volume
+# suffixes).
+BARE_VOLUME_NUMBER = re.compile(
+    r'\s+' + VOLUME_TAG + r'\s*\Z', re.IGNORECASE)
 
 # Stream language codes map to the catalog's display names
 # (release language.name) so the two can be compared softly.
@@ -797,7 +803,10 @@ class AlbumSearchTool(SearchTool):
         # matching (a catalog title "Saga One (Vol. 2)" must stay
         # distinct from "Saga One"), so it is unbracketed here and
         # stripped from the query by AlbumSearchTool.query.
-        name = VOLUME_MARKER.sub(r'\1', input_name)
+        # A leading space keeps the volume text separated from the
+        # preceding title word (unspaced input like "Saga(Vol.1)") and
+        # lets the query cleanup see a removable marker.
+        name = VOLUME_MARKER.sub(r' \1', input_name)
         name = re.sub(r'\[[^\]]*\]', strip_bracket_tag, name)
         name = re.sub(r'\(\s*(?:unabridged|abridged|audiobook)\s*\)',
                       ' ', name, flags=re.IGNORECASE)
@@ -812,8 +821,11 @@ class AlbumSearchTool(SearchTool):
         """
         search_results = []
         for item in api_response:
+            # A title must be usable text: a numeric title (e.g. 1984)
+            # reaches rendering and breaks len()/substring work, so it is
+            # rejected here, not downstream.
             if not isinstance(item, dict) or not item.get('id') \
-                    or not item.get('title'):
+                    or unicode_text(item.get('title')) is None:
                 continue
             authors = collect_role_credits(
                 item.get('people'), 'book', item['id'], 'Author')
@@ -1316,6 +1328,10 @@ def requested_book_number(name):
     match = VOLUME_MARKER.search(text)
     if match:
         return position_number(match.group(2))
+    # A bare trailing volume number the query will strip.
+    match = BARE_VOLUME_NUMBER.search(text)
+    if match:
+        return position_number(re.search(r'\d+', match.group(0)).group(0))
     return None
 
 
@@ -1456,12 +1472,14 @@ class ScoreTool:
             return 0
         distance = self.calculate_score(key, match_text(title))
         if subtitle:
-            # A catalog title may arrive as a number (e.g. 1984); keep
-            # the concatenation text-only.
+            # A catalog title or subtitle may arrive as a number or list;
+            # keep the concatenation text-only, and skip a non-text
+            # subtitle rather than raise.
             title_text = unicode_text(title)
-            if title_text is not None:
+            subtitle_text = unicode_text(subtitle)
+            if title_text is not None and subtitle_text is not None:
                 distance = min(distance, self.calculate_score(
-                    key, match_text(title_text + ' ' + subtitle)))
+                    key, match_text(title_text + ' ' + subtitle_text)))
         return distance * 2
 
     def score_author(self, author):

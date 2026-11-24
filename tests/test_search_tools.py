@@ -775,6 +775,17 @@ class TestNormalizeName(unittest.TestCase):
             tool.build_search_body()['q'],
             'The History (Vol. 1) of the Civil War')
 
+    def test_unspaced_trailing_volume_marker(self):
+        # An unspaced marker ("Saga(Vol.1)") unbrackets with a leading
+        # separator so the volume text stays separated from the title
+        # word and the query can drop it, matching the spaced form.
+        tool = make_album(FakeMedia(album='Saga(Vol.1)'))
+        self.assertEqual(tool.normalize_name(), 'Saga Vol.1')
+        self.assertEqual(tool.build_search_body()['q'], 'Saga')
+        tool2 = make_album(FakeMedia(album='Saga[Volume 3]'))
+        self.assertEqual(tool2.normalize_name(), 'Saga Volume 3')
+        self.assertEqual(tool2.build_search_body()['q'], 'Saga')
+
 
 class TestAlbumParseApiResponse(unittest.TestCase):
     def test_fixture_hits(self):
@@ -827,6 +838,19 @@ class TestAlbumParseApiResponse(unittest.TestCase):
     def test_non_dict_items_rejected(self):
         tool = make_album(FakeMedia())
         self.assertEqual(tool.parse_api_response(['nope', None, 5]), [])
+
+    def test_non_text_title_rejected(self):
+        # A numeric (or list) title is truthy but breaks rendering
+        # (len()); it is rejected before scoring, and a later valid hit
+        # is still kept.
+        tool = make_album(FakeMedia())
+        results = tool.parse_api_response([
+            {'id': 'a', 'title': 1984},
+            {'id': 'b', 'title': ['Not', 'Text']},
+            {'id': 'c', 'title': 'The Valid One'},
+        ])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['title'], 'The Valid One')
 
     def test_thumb_only_for_trusted_cdn_urls(self):
         tool = make_album(FakeMedia())
@@ -1522,6 +1546,15 @@ class TestScoreAlbumGuard(unittest.TestCase):
         self.assertEqual(self._tool('1984').score_album('1984', 1984), 8)
         self._tool('1984').score_album('1984', 1984, subtitle='Reissue')
 
+    def test_non_text_subtitle_is_skipped(self):
+        # A non-text subtitle (JSON number or list) is skipped rather
+        # than concatenated, so a text title still scores.
+        self.assertEqual(
+            self._tool('Saga').score_album('Saga', 'Saga', subtitle=3), 0)
+        self.assertEqual(
+            self._tool('Saga').score_album(
+                'Saga', 'Saga', subtitle=['Vol']), 0)
+
     def test_text_title_with_subtitle_uses_both(self):
         tool = self._tool('The Wall')
         # The subtitle path lowers the distance when it matches.
@@ -1706,6 +1739,25 @@ class TestSeriesHint(unittest.TestCase):
         ]}
         self.assertTrue(series_hint_eligible(
             'Everybody Loves Large Chests 1', candidate))
+
+    def test_bare_volume_number_contradicts(self):
+        # The query strips a bare trailing volume number, so the hint's
+        # contradiction check reads it from the raw name (book_number
+        # deliberately ignores volume suffixes).
+        candidate = {
+            'series': [{'title': 'Everybody Loves Large Chests',
+                        'position': {
+                            'status': 'complete',
+                            'spans': [{'start': 2, 'end': 2}]}}]}
+        self.assertFalse(series_hint_eligible(
+            'Everybody Loves Large Chests Vol. 1', candidate))
+        candidate2 = {
+            'series': [{'title': 'Everybody Loves Large Chests',
+                        'position': {
+                            'status': 'complete',
+                            'spans': [{'start': 1, 'end': 1}]}}]}
+        self.assertTrue(series_hint_eligible(
+            'Everybody Loves Large Chests Vol. 1', candidate2))
 
     def test_same_score_tie_uses_title_deduction(self):
         # Direct gate test: at a base-score tie, the hit with the
