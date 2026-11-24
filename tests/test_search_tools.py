@@ -574,6 +574,14 @@ class TestNormalizeName(unittest.TestCase):
         tool2 = make_album(FakeMedia(album='Saga [2017]'))
         self.assertEqual(tool2.normalize_name(), 'Saga')
 
+    def test_strips_non_numeric_book_bracket(self):
+        # A 'book' bracket without a number (e.g. [Book Club]) carries no
+        # book-number evidence and is stripped like any other tag.
+        tool = make_album(FakeMedia(album='Saga [Book Club]'))
+        self.assertEqual(tool.normalize_name(), 'Saga')
+        tool2 = make_album(FakeMedia(album='Saga [Books 1\u20133]'))
+        self.assertEqual(tool2.normalize_name(), 'Saga')
+
 
 class TestAlbumParseApiResponse(unittest.TestCase):
     def test_fixture_hits(self):

@@ -311,6 +311,29 @@ class TestAlbumResolveNative(unittest.TestCase):
         self.assertIsNone(tool.native_book_id)
         self.assertEqual(meta.title, None)
 
+    def test_unpinned_release_book_null_falls_back_to_work_only(self):
+        # An unpinned single-release book whose release detail returns
+        # book: null does not confirm membership; the update must fall
+        # back to work-level metadata only, not write the release's
+        # publisher/date/narrator, and must not pin the unverified
+        # release ID.
+        transport = self._transport()
+        release = load_fixture(RELEASE_DETAIL)
+        release['book'] = None
+        transport[BASE + '/releases/dPL9fC7YnK8X'] = (200, api_body(release))
+        install_transport(transport)
+        tool = make_album('book.WQQDcMBQ3qUT')
+        self.assertTrue(tool.resolve_item())
+        self.assertEqual(tool.native_book_id, 'WQQDcMBQ3qUT')
+        self.assertIsNone(tool.native_release_id)
+        # Work-level metadata was populated from the book detail.
+        self.assertEqual(tool.title, 'The Martian')
+        self.assertEqual(tool.author, [{'name': 'Andy Weir'}])
+        # Release-only fields stay empty: no studio, date, or narrator.
+        self.assertEqual(tool.studio, '')
+        self.assertIsNone(tool.date)
+        self.assertEqual(tool.narrator, [])
+
     def test_book_404_preserved(self):
         install_transport({})
         meta = FakeMetadata('book.WQQDcMBQ3qUT')

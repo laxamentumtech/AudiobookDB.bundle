@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 329 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 331 tests, 0 network.
 
 The test transport double (`tests/plex_shim.py`) has two modes: an
 eager default, and a `lazy=True` mode that mirrors Plex's real
@@ -70,7 +70,7 @@ contract is what gets exercised.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (113 tests)
+## `test_search_tools.py` (114 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -81,7 +81,7 @@ contract is what gets exercised.
 | `TestAlbumSearchToolBody` | 6 | `build_search_body`: with/without artist filters, too-short → `None`, nothing → `None`, filters-only (short title + artist) |
 | `TestAlbumParentAuthor` | 6 | parent author ID wiring: matched native person ID as evidence, mismatch/absence tolerated |
 | `TestNameToInitials` | 5 | `name_to_initials`: full names, already abbreviated, multi-word |
-| `TestNormalizeName` | 4 | `normalize_name`: brackets/specials/words stripped, album→title fallback, diacritics, bracketed book number preserved (unbracketed) while non-number tags are stripped |
+| `TestNormalizeName` | 5 | `normalize_name`: brackets/specials/words stripped, album→title fallback, diacritics, bracketed book number preserved (unbracketed) while non-number tags are stripped |
 | `TestAlbumParseApiResponse` | 7 | album `parse_api_response`: fixture hits, missing required keys, non-dict items, no narrator role, string-role credit skipped without dropping the hit |
 | `TestPreSearchLogging` | 5 | `pre_search_logging`: missing album → track title, unknown album → `None`, manual |
 | `TestAlbumReleasesForBook` | 5 | `releases_for_book`: original dicts returned, duplicate IDs deduped, merged-book 301 to winner resolved, release for another book filtered, failure/empty → `[]` |
@@ -93,12 +93,12 @@ contract is what gets exercised.
 | `TestArtistParseApiResponse` | 2 | artist `parse_api_response`: fixture, missing keys rejected |
 | `TestScoreTool` | 15 | scoring: subtitle + coauthor full-match evidence, same base with wrong volume available only in Fix Match, bracketed book number rejects an unnumbered same base (auto), accent-folded stem rejects a number conflict (comparison path only), prefixed/accented series title resolves a book-number conflict, ranged series positions, literal title number precedence, unrelated series/edition numbers tolerated, bare title + wrong author rejected, parent author ID evidence (match/mismatch/absence), relaxed author caps the name penalty at twenty, thumb carried without score change |
 
-## `test_update_tools.py` (78 tests)
+## `test_update_tools.py` (79 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestAlbumResolveLegacyAsin` | 3 | album `resolve_item`: legacy migration (populates, stashes native IDs), 404 untouched |
-| `TestAlbumResolveNative` | 10 | album `resolve_item`: book+release pinned, book-only multi-edition stays work-only, single-release 404 → work-only, mismatched pinned release rejected, pinned release 404 preserved, merged-book canonical detail ID replaces the stored loser ID (work-only and pinned), pinned release with `book: null` fails closed, book 404 preserved, wrong-type invalid |
+| `TestAlbumResolveNative` | 11 | album `resolve_item`: book+release pinned, book-only multi-edition stays work-only, single-release 404 → work-only, mismatched pinned release rejected, pinned release 404 preserved, merged-book canonical detail ID replaces the stored loser ID (work-only and pinned), pinned release with `book: null` fails closed, unpinned release with `book: null` falls back to work-only, book 404 preserved, wrong-type invalid |
 | `TestAlbumParseApiResponse` | 7 | album `parse_api_response`: series, no-releases work-only, audible chip rating (absent/non-first), missing cover → empty thumb, null/absent person names filtered from author/narrator lists, non-mapping `chapterDetail` / non-list `chapters` → no chapter data |
 | `TestReleaseSelection` | 3 | `select_release`: only release selected, multi-edition → work-only, no releases → `None` |
 | `TestArtistResolve` | 5 | artist `resolve_item`: legacy migration, native person, 404 untouched, ambiguous ASIN untouched, wrong-type invalid |

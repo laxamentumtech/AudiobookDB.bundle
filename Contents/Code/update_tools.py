@@ -221,6 +221,14 @@ class AlbumUpdateTool(UpdateTool):
                             'canonical book; leaving metadata untouched '
                             '(require rematching).' % release_id)
                         return False
+                    # An unpinned release that does not name the canonical
+                    # book is no better verified than a wrong-book release:
+                    # fall back to work-level metadata only.
+                    log.warn('Release %s does not name the canonical book; '
+                             'updating work-level metadata only.'
+                             % release_id)
+                    release = None
+                    release_id = None
                 elif parent != book_id:
                     log.warn('Release %s belongs to book %s, not %s.'
                              % (release_id, parent, book_id))
