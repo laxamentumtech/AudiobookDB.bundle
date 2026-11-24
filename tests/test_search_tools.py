@@ -1111,6 +1111,19 @@ class TestScoreTool(unittest.TestCase):
                 self.score_book('Saga Book 2', 'Saga',
                                 seriesWithId=series)[0]['id'], 'book.abc')
 
+    def test_partial_position_cannot_support_or_hide_title_conflict(self):
+        partial = {'kind': 'point', 'status': 'partial', 'value': '1',
+                   'label': '1', 'sortKey': 1,
+                   'spans': [{'start': 2, 'end': 2}]}
+        series = [{'title': 'Saga', 'position': partial}]
+        # Partial coverage is not support: a conflicting title number wins.
+        self.assertEqual(
+            self.score_book('Saga 2', 'Saga 1', seriesWithId=series), [])
+        # An unnumbered title with only partial coverage abstains.
+        self.assertEqual(
+            self.score_book('Saga Book 2', 'Saga',
+                            seriesWithId=series)[0]['id'], 'book.abc')
+
     def test_malformed_span_is_not_contradiction(self):
         for spans in ([{'start': 5, 'end': 2}],
                       [{'start': None, 'end': 5}],

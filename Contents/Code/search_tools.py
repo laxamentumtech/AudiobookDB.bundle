@@ -1026,8 +1026,8 @@ def conflicts_with_book_number(query, candidate):
         if not isinstance(position, dict):
             has_unknown = True
             continue
-        # Spans are authoritative for point, range and set positions; a
-        # malformed or reversed span is never evidence against a hit.
+        # Spans are authoritative only for a complete position; malformed,
+        # reversed or partial spans are never evidence for a hit.
         usable_spans = []
         for span in position.get('spans') or []:
             if not isinstance(span, dict):
@@ -1037,14 +1037,17 @@ def conflicts_with_book_number(query, candidate):
             if start is None or end is None or start > end:
                 continue
             usable_spans.append((start, end))
-        for start, end in usable_spans:
-            if start <= number <= end:
-                return False
-        if usable_spans and position.get('status') == 'complete':
-            has_conflict = True
+        if position.get('status') == 'complete':
+            for start, end in usable_spans:
+                if start <= number <= end:
+                    return False
+            if usable_spans:
+                has_conflict = True
+            else:
+                has_unknown = True
         else:
-            # Explicit absent/partial/unparsed or unusable position data
-            # is unknown, not a contradiction.
+            # Explicit absent/partial/unparsed position data is unknown,
+            # not support and not a contradiction.
             has_unknown = True
     if has_conflict:
         return True
