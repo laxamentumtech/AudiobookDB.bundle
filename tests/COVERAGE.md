@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 331 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 333 tests, 0 network.
 
 The test transport double (`tests/plex_shim.py`) has two modes: an
 eager default, and a `lazy=True` mode that mirrors Plex's real
@@ -70,7 +70,7 @@ contract is what gets exercised.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (114 tests)
+## `test_search_tools.py` (115 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -81,7 +81,7 @@ contract is what gets exercised.
 | `TestAlbumSearchToolBody` | 6 | `build_search_body`: with/without artist filters, too-short → `None`, nothing → `None`, filters-only (short title + artist) |
 | `TestAlbumParentAuthor` | 6 | parent author ID wiring: matched native person ID as evidence, mismatch/absence tolerated |
 | `TestNameToInitials` | 5 | `name_to_initials`: full names, already abbreviated, multi-word |
-| `TestNormalizeName` | 5 | `normalize_name`: brackets/specials/words stripped, album→title fallback, diacritics, bracketed book number preserved (unbracketed) while non-number tags are stripped |
+| `TestNormalizeName` | 6 | `normalize_name`: brackets/specials/words stripped, album→title fallback, diacritics, bracketed book number preserved (unbracketed) while non-number and mixed tags are stripped |
 | `TestAlbumParseApiResponse` | 7 | album `parse_api_response`: fixture hits, missing required keys, non-dict items, no narrator role, string-role credit skipped without dropping the hit |
 | `TestPreSearchLogging` | 5 | `pre_search_logging`: missing album → track title, unknown album → `None`, manual |
 | `TestAlbumReleasesForBook` | 5 | `releases_for_book`: original dicts returned, duplicate IDs deduped, merged-book 301 to winner resolved, release for another book filtered, failure/empty → `[]` |
@@ -93,7 +93,7 @@ contract is what gets exercised.
 | `TestArtistParseApiResponse` | 2 | artist `parse_api_response`: fixture, missing keys rejected |
 | `TestScoreTool` | 15 | scoring: subtitle + coauthor full-match evidence, same base with wrong volume available only in Fix Match, bracketed book number rejects an unnumbered same base (auto), accent-folded stem rejects a number conflict (comparison path only), prefixed/accented series title resolves a book-number conflict, ranged series positions, literal title number precedence, unrelated series/edition numbers tolerated, bare title + wrong author rejected, parent author ID evidence (match/mismatch/absence), relaxed author caps the name penalty at twenty, thumb carried without score change |
 
-## `test_update_tools.py` (79 tests)
+## `test_update_tools.py` (80 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -103,7 +103,7 @@ contract is what gets exercised.
 | `TestReleaseSelection` | 3 | `select_release`: only release selected, multi-edition → work-only, no releases → `None` |
 | `TestArtistResolve` | 5 | artist `resolve_item`: legacy migration, native person, 404 untouched, ambiguous ASIN untouched, wrong-type invalid |
 | `TestUpdateToolHelpers` | 8 | `cleanup_html` (books/authors), `replace_html_special`, `collect_metadata_to_log` (books + authors), `collect_metadata_arrs_to_log` (legacy typo), `getDateFromString`, `volume_prefix` |
-| `TestAlbumSetters` | 22 | `set_metadata_title` (+subtitle), `set_metadata_rating` (x2, none no-op), `set_metadata_date` guard, `set_metadata_studio`, `set_metadata_summary` (+ empty/whitespace/markup-only description preserves an existing summary and is logged; forced and non-forced assignment unchanged), `set_metadata_sort_title` (+series), `set_metadata_tags` (+keep existing genres), `set_metadata_series_collections` (no container → warning, not silent), `set_metadata_chapters` (out-of-order and one-based-ordinal sequences rejected before any title write; in-order sequence rewrites generic titles) |
+| `TestAlbumSetters` | 23 | `set_metadata_title` (+subtitle), `set_metadata_rating` (x2, none no-op), `set_metadata_date` guard, `set_metadata_studio`, `set_metadata_summary` (+ empty/whitespace/markup-only description preserves an existing summary and is logged; forced and non-forced assignment unchanged), `set_metadata_sort_title` (+series), `set_metadata_tags` (+keep existing genres), `set_metadata_series_collections` (no container → warning, not silent), `set_metadata_chapters` (overlapping — out-of-order and identical — and one-based-ordinal sequences rejected before any title write; in-order sequence rewrites generic titles) |
 | `TestArtistSetters` | 15 | `set_metadata_title`, `set_metadata_description` (+ same keep-existing-on-empty policy as the album setter), `set_metadata_sort_title` (last name/JR/single word), `set_metadata_tags`, `set_empty_variables` |
 | `TestTagTool` | 5 | `TagTool` force-clears narrators (styles preserved when there are no narrators to re-add), non-force keeps existing, author/contributor handling, `similar=None` no-op |
 
