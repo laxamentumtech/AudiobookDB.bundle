@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-`python:2.7-slim` in docker, full unittest discovery). 338 tests, 0 network.
+`python:2.7-slim` in docker, full unittest discovery). 341 tests, 0 network.
 
 The test transport double (`tests/plex_shim.py`) has two modes: an
 eager default, and a `lazy=True` mode that mirrors Plex's real
@@ -70,7 +70,7 @@ contract is what gets exercised.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (120 tests)
+## `test_search_tools.py` (123 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -91,7 +91,7 @@ contract is what gets exercised.
 | `TestCleanupAuthorName` | 4 | `cleanup_author_name`: role removals, diacritics |
 | `TestArtistMultiArtist` | 5 | `find_non_contributor`, `handle_multi_artist`, `get_primary_author` |
 | `TestArtistParseApiResponse` | 2 | artist `parse_api_response`: fixture, missing keys rejected |
-| `TestScoreTool` | 20 | scoring: subtitle + coauthor full-match evidence, four same-base wrong-volume targets available only in Fix Match, bracketed book number rejects an unnumbered same base (auto), accent-folded stem rejects a number conflict (comparison path only), prefixed/accented series title resolves a book-number conflict, ranged and disjoint-set series positions, legacy ordinal only when position is missing, explicit unknown/partial positions abstain, malformed/reversed spans are not contradictions, literal title number precedence, unrelated series/edition numbers tolerated, unrelated title numbers do not override membership, bare title + wrong author rejected, parent author ID evidence (match/mismatch/absence), relaxed author caps the name penalty at twenty, thumb carried without score change |
+| `TestScoreTool` | 23 | scoring: subtitle + coauthor full-match evidence, four same-base wrong-volume targets available only in Fix Match, bracketed book number rejects an unnumbered same base (auto), accent-folded stem rejects a number conflict (comparison path only), prefixed/accented series title resolves a book-number conflict, ranged and disjoint-set series positions, legacy ordinal only when position is missing, explicit unknown/partial positions abstain for unnumbered titles but do not hide a same-stem title-number conflict, fractional and non-finite ordinals/spans abstain, malformed/reversed spans are not contradictions, literal title number precedence, unrelated series/edition numbers tolerated, unrelated title numbers do not override membership, bare title + wrong author rejected, parent author ID evidence (match/mismatch/absence), relaxed author caps the name penalty at twenty, thumb carried without score change |
 
 ## `test_update_tools.py` (80 tests)
 

@@ -946,21 +946,33 @@ def book_number_key(title):
     return fold_accents(stem), number
 
 
+def integral_number(value):
+    """
+        The integral value of a finite number, or None. Fractional and
+        non-finite values are unknown, never integer book numbers.
+    """
+    if value != value or value in (float('inf'), float('-inf')):
+        return None
+    if value != int(value):
+        return None
+    return int(value)
+
+
 def position_number(value):
     """
-        Numeric value from a structured series position or legacy ordinal.
-        Returns None for non-numeric or malformed values.
+        Integral numeric value from a structured series position or legacy
+        ordinal. Fractional, non-finite and malformed values return None.
     """
     if isinstance(value, bool):
         return None
     if isinstance(value, float):
-        return value
+        return integral_number(value)
     if isinstance(value, TEXT_TYPE):
         text = value.strip()
         if re.match(r'^[0-9]+$', text):
             return int(text)
         if re.match(r'^[0-9]+\.[0-9]+$', text):
-            return float(text)
+            return integral_number(float(text))
         return None
     try:
         return int(value)
@@ -1030,10 +1042,14 @@ def conflicts_with_book_number(query, candidate):
             has_unknown = True
     if has_conflict:
         return True
+    # An explicit number on the same title stem is a contradiction even when
+    # a membership position is unknown; support already returned above.
+    if title_key == query_key and title_number is not None:
+        return True
     if has_unknown:
         return False
     if title_key == query_key:
-        return title_number is not None or number > 1
+        return number > 1
     return False
 
 

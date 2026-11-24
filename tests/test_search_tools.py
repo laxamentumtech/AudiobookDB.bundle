@@ -1131,6 +1131,57 @@ class TestScoreTool(unittest.TestCase):
         self.assertEqual(
             self.score_book('Saga Book 2', 'Saga', seriesWithId=series), [])
 
+    def test_unknown_membership_does_not_hide_title_number_conflict(self):
+        # An explicit wrong number on the same stem stays a contradiction;
+        # an unknown membership only suppresses the inferred mismatch for
+        # an unnumbered title (covered above).
+        absent = {'kind': 'unknown', 'status': 'absent', 'value': None,
+                  'label': '', 'sortKey': None, 'spans': []}
+        series = [{'title': 'Saga', 'ordinal': '1', 'position': absent}]
+        self.assertEqual(
+            self.score_book('Saga 2', 'Saga 1', seriesWithId=series), [])
+        manual = self.score_book('Saga 2', 'Saga 1', manual=True,
+                                 seriesWithId=series)
+        self.assertEqual(manual[0]['score'], 98)
+
+    def test_fractional_positions_abstain(self):
+        # A legacy fractional ordinal is not an integer book number.
+        series = [{'title': 'Saga', 'ordinal': '1.5'}]
+        self.assertEqual(
+            self.score_book('Saga Book 2', 'Saga',
+                            seriesWithId=series)[0]['id'], 'book.abc')
+        # A complete fractional point span is equally unknown.
+        position = {'kind': 'point', 'status': 'complete', 'value': '1.5',
+                    'label': '1.5', 'sortKey': 1.5,
+                    'spans': [{'start': 1.5, 'end': 1.5}]}
+        series = [{'title': 'Saga', 'ordinal': '1.5', 'position': position}]
+        self.assertEqual(
+            self.score_book('Saga Book 2', 'Saga',
+                            seriesWithId=series)[0]['id'], 'book.abc')
+        # A known title contradiction still wins over unknown positions.
+        self.assertEqual(
+            self.score_book('Saga 2', 'Saga 1', seriesWithId=series), [])
+
+    def test_non_finite_positions_abstain(self):
+        nan = float('nan')
+        inf = float('inf')
+        for ordinal in (nan, inf, 'nan'):
+            series = [{'title': 'Saga', 'ordinal': ordinal}]
+            self.assertEqual(
+                self.score_book('Saga Book 2', 'Saga',
+                                seriesWithId=series)[0]['id'], 'book.abc',
+                ordinal)
+        for span in ({'start': nan, 'end': nan},
+                     {'start': 1, 'end': inf},
+                     {'start': -inf, 'end': 5}):
+            position = {'kind': 'range', 'status': 'complete',
+                        'spans': [span]}
+            series = [{'title': 'Saga', 'position': position}]
+            self.assertEqual(
+                self.score_book('Saga Book 2', 'Saga',
+                                seriesWithId=series)[0]['id'], 'book.abc',
+                span)
+
     def test_unrelated_title_number_does_not_override_membership(self):
         series = [{'title': 'Saga', 'position': {
             'status': 'complete', 'spans': [{'start': 1, 'end': 1}],
