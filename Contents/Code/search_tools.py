@@ -745,6 +745,13 @@ class AlbumSearchTool(SearchTool):
             return None
         return names[0]
 
+    # Bracketed volume markers ((Vol.1), [Volume 3], ...). The search API
+    # treats "Vol. N" in the query as a volume-pattern filter that drops
+    # books cataloged as "Book N" (and "Book N" queries drop "Vol. N"
+    # books), so a volume hint is stripped like any other edition tag
+    # rather than kept as title evidence.
+    VOLUME_TAG = r'vol(?:ume)?\.?\s*\d+'
+
     def normalize_name(self):
         """
             Normalizes the album name by removing
@@ -765,7 +772,10 @@ class AlbumSearchTool(SearchTool):
                 return ' ' + inner + ' '
             return ' '
 
-        name = re.sub(r'\[[^\]]*\]', strip_bracket_tag, input_name)
+        volume = re.compile(r'[\[\(]\s*' + self.VOLUME_TAG + r'\s*[\]\)]',
+                            re.IGNORECASE)
+        name = volume.sub(' ', input_name)
+        name = re.sub(r'\[[^\]]*\]', strip_bracket_tag, name)
         name = re.sub(r'\(\s*(?:unabridged|abridged|audiobook)\s*\)',
                       ' ', name, flags=re.IGNORECASE)
         name = re.sub(r'\s+audiobook\s*$', '', name, flags=re.IGNORECASE)

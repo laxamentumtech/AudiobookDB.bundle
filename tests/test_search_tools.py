@@ -718,6 +718,26 @@ class TestNormalizeName(unittest.TestCase):
         tool2 = make_album(FakeMedia(album='Saga [Book 2]'))
         self.assertEqual(tool2.normalize_name(), 'Saga Book 2')
 
+    def test_strips_bracketed_volume_marker(self):
+        # The search API filters on a "Vol. N" pattern in the query and
+        # drops books cataloged as "Book N" (and vice versa), so a
+        # bracketed volume hint is stripped like an edition tag.
+        tool = make_album(FakeMedia(
+            album='Morningwood: Everybody Loves Large Chests (Vol.1)'))
+        self.assertEqual(
+            tool.normalize_name(),
+            'Morningwood: Everybody Loves Large Chests')
+        tool2 = make_album(FakeMedia(album='Saga [Volume 3]'))
+        self.assertEqual(tool2.normalize_name(), 'Saga')
+        tool3 = make_album(FakeMedia(album='Saga [vol 2]'))
+        self.assertEqual(tool3.normalize_name(), 'Saga')
+
+    def test_keeps_unbracketed_volume_in_title(self):
+        # A volume marker woven into the title (not an edition tag) is
+        # part of the work's name and stays in the query.
+        tool = make_album(FakeMedia(album='Jackson Vol. 9'))
+        self.assertEqual(tool.normalize_name(), 'Jackson Vol. 9')
+
 
 class TestAlbumParseApiResponse(unittest.TestCase):
     def test_fixture_hits(self):
