@@ -971,8 +971,14 @@ def position_number(value):
         text = value.strip()
         if re.match(r'^[0-9]+$', text):
             return int(text)
-        if re.match(r'^[0-9]+\.[0-9]+$', text):
-            return integral_number(float(text))
+        match = re.match(r'^([0-9]+)\.([0-9]+)$', text)
+        if match:
+            # Check the fractional digits exactly: float('1.0000000000000001')
+            # rounds to 1.0, which would turn a fractional position into an
+            # integer contradiction.
+            if match.group(2).strip('0'):
+                return None
+            return int(match.group(1))
         return None
     try:
         return int(value)
