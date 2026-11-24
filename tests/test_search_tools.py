@@ -1145,20 +1145,25 @@ class TestScoreTool(unittest.TestCase):
         self.assertEqual(manual[0]['score'], 98)
 
     def test_fractional_positions_abstain(self):
-        # A legacy fractional ordinal is not an integer book number.
-        series = [{'title': 'Saga', 'ordinal': '1.5'}]
-        self.assertEqual(
-            self.score_book('Saga Book 2', 'Saga',
-                            seriesWithId=series)[0]['id'], 'book.abc')
+        # A legacy fractional ordinal is not an integer book number. Both
+        # Python 2 text types must reach the exact digit parser.
+        for ordinal in ('1.5', u'1.5'):
+            series = [{'title': 'Saga', 'ordinal': ordinal}]
+            self.assertEqual(
+                self.score_book('Saga Book 2', 'Saga',
+                                seriesWithId=series)[0]['id'], 'book.abc')
         # Decimal-string precision must not round a fraction to an integer.
-        series = [{'title': 'Saga', 'ordinal': '1.0000000000000001'}]
-        self.assertEqual(
-            self.score_book('Saga Book 2', 'Saga',
-                            seriesWithId=series)[0]['id'], 'book.abc')
+        for ordinal in ('1.0000000000000001', u'1.0000000000000001'):
+            series = [{'title': 'Saga', 'ordinal': ordinal}]
+            self.assertEqual(
+                self.score_book('Saga Book 2', 'Saga',
+                                seriesWithId=series)[0]['id'], 'book.abc')
         # An all-zero fraction is still integral evidence against book 2.
-        series = [{'title': 'Saga', 'ordinal': '1.0'}]
-        self.assertEqual(
-            self.score_book('Saga Book 2', 'Saga', seriesWithId=series), [])
+        for ordinal in ('1.0', u'1.0'):
+            series = [{'title': 'Saga', 'ordinal': ordinal}]
+            self.assertEqual(
+                self.score_book('Saga Book 2', 'Saga',
+                                seriesWithId=series), [])
         # A complete fractional point span is equally unknown.
         position = {'kind': 'point', 'status': 'complete', 'value': '1.5',
                     'label': '1.5', 'sortKey': 1.5,

@@ -967,7 +967,7 @@ def position_number(value):
         return None
     if isinstance(value, float):
         return integral_number(value)
-    if isinstance(value, TEXT_TYPE):
+    if isinstance(value, (str, TEXT_TYPE)):
         text = value.strip()
         if re.match(r'^[0-9]+$', text):
             return int(text)
