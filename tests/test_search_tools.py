@@ -841,12 +841,13 @@ class TestAlbumParseApiResponse(unittest.TestCase):
 
     def test_non_text_title_rejected(self):
         # A numeric (or list) title is truthy but breaks rendering
-        # (len()); it is rejected before scoring, and a later valid hit
-        # is still kept.
+        # (len()); an empty title is falsey. Both are rejected before
+        # scoring, and a later valid hit is still kept.
         tool = make_album(FakeMedia())
         results = tool.parse_api_response([
             {'id': 'a', 'title': 1984},
             {'id': 'b', 'title': ['Not', 'Text']},
+            {'id': 'e', 'title': ''},
             {'id': 'c', 'title': 'The Valid One'},
         ])
         self.assertEqual(len(results), 1)

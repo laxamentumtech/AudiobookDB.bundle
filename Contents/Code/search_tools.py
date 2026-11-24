@@ -821,11 +821,12 @@ class AlbumSearchTool(SearchTool):
         """
         search_results = []
         for item in api_response:
-            # A title must be usable text: a numeric title (e.g. 1984)
-            # reaches rendering and breaks len()/substring work, so it is
-            # rejected here, not downstream.
+            # A title must be nonempty usable text: a numeric title
+            # (e.g. 1984) or an empty string reaches rendering and breaks
+            # len()/substring work or drops the key, so it is rejected
+            # here, not downstream.
             if not isinstance(item, dict) or not item.get('id') \
-                    or unicode_text(item.get('title')) is None:
+                    or not unicode_text(item.get('title')):
                 continue
             authors = collect_role_credits(
                 item.get('people'), 'book', item['id'], 'Author')
