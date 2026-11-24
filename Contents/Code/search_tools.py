@@ -1002,15 +1002,40 @@ try:
 except NameError:  # pragma: no cover - python 3
     TEXT_TYPE = str
 
+try:
+    BYTES_TYPE = bytes
+except NameError:  # pragma: no cover - python 2
+    BYTES_TYPE = str
+
 
 def unicode_text(value):
     if isinstance(value, TEXT_TYPE):
         return value
-    return value.decode('utf-8', 'replace')
+    if isinstance(value, BYTES_TYPE):
+        return value.decode('utf-8', 'replace')
+    # Malformed catalog data (e.g. a numeric series title) must degrade
+    # to unknown, not raise.
+    return None
 
 
 def match_text(value):
-    return re.sub(r'[\W_]+', '', unicode_text(value).lower(), flags=re.UNICODE)
+    text = unicode_text(value)
+    if text is None:
+        return u''
+    return re.sub(r'[\W_]+', '', text.lower(), flags=re.UNICODE)
+
+
+def phrase_key(value):
+    """
+        Accent-folded, lower-cased phrase for whole-token containment:
+        separators (punctuation, underscores) become single spaces, so
+        'Foo-Bar', 'Foo_Bar' and 'Foo Bar' compare equal while 'Foobar'
+        does not. None when the value is not usable text.
+    """
+    text = unicode_text(value)
+    if text is None:
+        return None
+    return re.sub(r'[\W_]+', ' ', fold_accents(text).lower()).strip()
 
 
 def fold_accents(value):
@@ -1020,6 +1045,8 @@ def fold_accents(value):
         The original title is never altered; this is a comparison key only.
     """
     text = unicode_text(value)
+    if text is None:
+        return u''
     decomposed = unicodedata.normalize('NFKD', text)
     stripped = [char for char in decomposed
                 if not unicodedata.combining(char)]
@@ -1028,6 +1055,8 @@ def fold_accents(value):
 
 def book_number(title):
     title = unicode_text(title)
+    if title is None:
+        return u'', None
     match = BOOK_NUMBER.match(title)
     if match:
         stem = match.group(1).rstrip()
@@ -1162,6 +1191,107 @@ def conflicts_with_book_number(query, candidate):
     return False
 
 
+# Minimum letters/digits (separators excluded) for a series title to count
+# as a Fix Match name hint; shorter names are too common to be evidence.
+SERIES_HINT_MIN_CHARS = 6
+
+
+def series_title_text(series):
+    """
+        The series title as usable text, or None for a malformed
+        membership entry.
+    """
+    if not isinstance(series, dict):
+        return None
+    return unicode_text(series.get('title'))
+
+
+def series_name_in_text(name, text):
+    """
+        True when the series title appears in ``text`` as a contiguous
+        whole-token phrase: accent-folded, case-insensitive, with
+        punctuation and underscores treated as separators. One qualifying
+        membership is all the hint needs; nothing stacks.
+    """
+    if not name or not text:
+        return False
+    name_key = phrase_key(name)
+    if not name_key:
+        return False
+    if len(re.sub(r'\s', '', name_key)) < SERIES_HINT_MIN_CHARS:
+        return False
+    text_key = phrase_key(text)
+    if not text_key:
+        return False
+    # Padding makes containment a token-boundary test, so a short series
+    # title cannot match inside a longer word.
+    return ' ' + name_key + ' ' in ' ' + text_key + ' '
+
+
+def series_supports_number(series, number):
+    """
+        Position evidence from one membership for a requested book
+        number: True when it supports, False when it contradicts, None
+        when the membership carries no usable position.
+
+        A book-number conflict withholds the name hint: a series name is
+        evidence for the series, not for a particular volume.
+    """
+    if number is None:
+        return None
+    position = series.get('position')
+    if position is None or position == {} or not isinstance(position, dict):
+        # Legacy membership: a numeric ordinal is the only position.
+        ordinal = position_number(series.get('ordinal'))
+        if ordinal is None:
+            return None
+        return ordinal == number
+    if position.get('status') != 'complete':
+        # Explicit absent/partial/unparsed position data is unknown, not
+        # support and not a contradiction.
+        return None
+    # A complete position speaks only through its usable spans, mirroring
+    # the conflict check: usable spans that miss the number contradict
+    # it; an empty or malformed span set is unknown.
+    usable = False
+    for span in position.get('spans') or []:
+        if not isinstance(span, dict):
+            continue
+        start = position_number(span.get('start'))
+        end = position_number(span.get('end'))
+        if start is None or end is None or start > end:
+            continue
+        usable = True
+        if start <= number <= end:
+            return True
+    if usable:
+        return False
+    return None
+
+
+def series_hint_eligible(name, candidate):
+    """
+        Fix Match hint eligibility: a qualifying series-name match in the
+        local album name that is not contradicted by any membership's
+        position. Unknown positions never block the hint.
+    """
+    if not name:
+        return False
+    memberships = candidate.get('series')
+    if not isinstance(memberships, list):
+        return False
+    for series in memberships:
+        title = series_title_text(series)
+        if title is None:
+            continue
+        if not series_name_in_text(title, name):
+            continue
+        if series_supports_number(series, book_number(name)[1]) is False:
+            return False
+        return True
+    return False
+
+
 class ScoreTool:
     # Starting value for score before deductions are taken.
     INITIAL_SCORE = 100
@@ -1172,6 +1302,10 @@ class ScoreTool:
                  result_dict):
         self.calculate_score = levenshtein_distance
         self.disambiguation = None
+        # Scoring metadata recorded by run_score_book; defaults keep the
+        # artist path (run_score_author) result-free of book fields.
+        self.title_score = 0
+        self.series_eligible = False
         self.helper = helper
         self.index = index
         self.info = info
@@ -1225,10 +1359,21 @@ class ScoreTool:
                 if credit.get('id') == parent_id:
                     author_score = 0
                     break
+        # Fix Match series-name hint: eligibility is decided here (the
+        # raw effective album name is the hint surface) and the point is
+        # applied later, only where it cannot change a title ranking. The
+        # per-hit title deduction feeds the gate's tie-break.
+        self.title_score = title_score
+        self.series_eligible = False
+        if self.helper.manual:
+            self.series_eligible = series_hint_eligible(
+                self.helper.media.album, self.result_dict)
         self.score_result(title_score + author_score)
 
     def score_create_result(self, score):
-        result = {'id': self.asin, 'score': score}
+        result = {'id': self.asin, 'score': score,
+                  'title_deduction': self.title_score,
+                  'series_eligible': self.series_eligible}
         if self.author:
             author = self.author
             if self.disambiguation:

@@ -16,6 +16,7 @@ import api_client  # noqa: E402
 from search_tools import (  # noqa: E402
     SearchTool, AlbumSearchTool, ArtistSearchTool, ScoreTool,
     image_thumb, release_year,
+    series_name_in_text, series_supports_number, series_hint_eligible,
 )
 
 # Zero the inter-attempt sleep so failure-path tests are fast.
@@ -1469,6 +1470,134 @@ class TestScoreTool(unittest.TestCase):
             'The Martian Chronicles', 'The Martian Chronicles',
             artist='Andy Weir', authors=['Xanthique Zephyrium'],
             manual=True, relaxed_author=True)[0]['score'], 80)
+
+
+class TestSeriesHint(unittest.TestCase):
+    """Fix Match series-name hint: matching, eligibility, robustness."""
+
+    def test_contiguous_whole_phrase_matches(self):
+        name = 'Everybody Loves Large Chests'
+        self.assertTrue(series_name_in_text(
+            name, 'Morningwood: Everybody Loves Large Chests (Vol.1)'))
+        self.assertTrue(series_name_in_text(
+            name, 'everybody loves large chests 1'))
+        # Accents and case are folded on both sides.
+        self.assertTrue(series_name_in_text(
+            u'Ca\u00f1on Verde', u'ca\u00f1on verde saga'))
+        self.assertTrue(series_name_in_text(
+            'Canon Verde', u'CA\u00d1ON VERDE saga'))
+
+    def test_punctuation_and_underscores_are_separators(self):
+        self.assertTrue(series_name_in_text(
+            'Foo Bar', 'foo-bar saga'))
+        self.assertTrue(series_name_in_text(
+            'Foo Bar', 'foo_bar saga'))
+        # Cross-token concatenation is not a phrase match.
+        self.assertFalse(series_name_in_text(
+            'Foo Bar', 'Foobar saga'))
+        # A gapped phrase is not contiguous.
+        self.assertFalse(series_name_in_text(
+            'Foo Bar', 'foo and bar saga'))
+
+    def test_token_boundary_blocks_substring_match(self):
+        # A series title must not match inside a longer word.
+        self.assertFalse(series_name_in_text(
+            'Series', 'my seriescollection saga'))
+        self.assertTrue(series_name_in_text(
+            'Series', 'the series saga'))
+
+    def test_min_length_counts_letters_and_digits_only(self):
+        # Five letters/digits is one short of the minimum.
+        self.assertFalse(series_name_in_text('Foo Ba', 'foo ba saga'))
+        # Six is in, separators excluded from the count.
+        self.assertTrue(series_name_in_text('Foo Bar', 'foo bar saga'))
+        self.assertTrue(series_name_in_text('Foo_Bar', 'foo bar saga'))
+
+    def test_malformed_series_titles_degrade(self):
+        self.assertFalse(series_name_in_text(None, 'anything'))
+        self.assertFalse(series_name_in_text(123, 'anything'))
+        self.assertFalse(series_name_in_text([], 'anything'))
+        self.assertFalse(series_name_in_text('Long Enough Name', None))
+        self.assertFalse(series_name_in_text('Long Enough Name', 42))
+
+    def test_supports_number_ordinal_and_position(self):
+        self.assertTrue(series_supports_number(
+            {'ordinal': 2}, 2))
+        self.assertFalse(series_supports_number(
+            {'ordinal': 2}, 3))
+        self.assertIsNone(series_supports_number({}, 2))
+        self.assertIsNone(series_supports_number(
+            {'position': {'status': 'complete', 'spans': []}}, 2))
+        self.assertTrue(series_supports_number(
+            {'position': {'status': 'complete',
+                          'spans': [{'start': 1, 'end': 3}]}}, 2))
+        self.assertFalse(series_supports_number(
+            {'position': {'status': 'complete',
+                          'spans': [{'start': 4, 'end': 5}]}}, 2))
+        # A partial position abstains: neither support nor conflict.
+        self.assertIsNone(series_supports_number(
+            {'position': {'status': 'partial',
+                          'spans': [{'start': 1, 'end': 3}]}}, 2))
+        self.assertIsNone(series_supports_number({'ordinal': 2}, None))
+
+    def test_eligible_on_name_match(self):
+        candidate = {'series': [
+            {'title': 'Everybody Loves Large Chests',
+             'position': {'status': 'complete',
+                          'spans': [{'start': 1, 'end': 1}]}}
+        ]}
+        self.assertTrue(series_hint_eligible(
+            'Morningwood: Everybody Loves Large Chests (Vol.1)',
+            candidate))
+
+    def test_conflicting_position_withholds_the_hint(self):
+        candidate = {'series': [
+            {'title': 'Everybody Loves Large Chests',
+             'position': {'status': 'complete',
+                          'spans': [{'start': 2, 'end': 2}]}}
+        ]}
+        # The album name asks for volume 1; the membership says volume 2.
+        self.assertFalse(series_hint_eligible(
+            'Everybody Loves Large Chests 1', candidate))
+
+    def test_unknown_position_never_withholds(self):
+        candidate = {'series': [
+            {'title': 'Everybody Loves Large Chests'}
+        ]}
+        self.assertTrue(series_hint_eligible(
+            'Everybody Loves Large Chests 1', candidate))
+
+    def test_malformed_memberships_are_ignored(self):
+        candidate = {'series': [
+            'not a dict',
+            {'position': 42},
+            {'title': 123},
+            {'title': None},
+            {'title': 'Everybody Loves Large Chests'},
+        ]}
+        self.assertTrue(series_hint_eligible(
+            'Everybody Loves Large Chests 1', candidate))
+
+    def test_no_series_field_is_not_eligible(self):
+        self.assertFalse(series_hint_eligible(
+            'Everybody Loves Large Chests 1', {'title': 'X'}))
+
+    def test_non_list_series_container_is_not_eligible(self):
+        # A string is truthy, so ``or []`` would not rescue it; iterating
+        # it would walk characters. The guard treats it as no membership.
+        self.assertFalse(series_hint_eligible(
+            'Everybody Loves Large Chests 1', {'series': 'not a list'}))
+        self.assertFalse(series_hint_eligible(
+            'Everybody Loves Large Chests 1', {'series': 42}))
+
+    def test_only_qualifying_membership_counts(self):
+        # The first membership does not match; the second does.
+        candidate = {'series': [
+            {'title': 'Unrelated Series'},
+            {'title': 'Everybody Loves Large Chests'},
+        ]}
+        self.assertTrue(series_hint_eligible(
+            'Everybody Loves Large Chests 1', candidate))
 
 
 if __name__ == '__main__':
