@@ -270,6 +270,43 @@ class TestAlbumSearch(unittest.TestCase):
                        if 'include=releases' in req[0]]
         self.assertEqual(detail_reqs, [])
 
+    def test_search_compacts_multiple_narrators_with_count(self):
+        hits = [{
+            'id': 'aaaaaaaaaaaa',
+            'title': 'The Martian',
+            'people': [
+                {'role': {'name': 'Author'},
+                 'person': {'id': 'p1', 'name': 'Andy Weir'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n1', 'name': 'Wil Wheaton'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n2', 'name': 'R.C. Bray'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n3', 'name': 'Scott Brick'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n4', 'name': 'Kate Reading'}},
+            ],
+            'originalLanguage': 'English',
+        }]
+        appended = self._search(hits, manual=True)
+        self.assertEqual(len(appended), 1)
+        name = appended[0].name
+        # The display never silently drops narrators: the names that fit
+        # are followed by the explicit remaining count.
+        self.assertIn('W.Wheaton', name)
+        self.assertIn('R.C.Bray', name)
+        self.assertIn('+1', name)
+
+    def test_authors_only_hit_has_no_narrator_separator(self):
+        install_transport(load_fixture('search_books_martian.json'))
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(), plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(len(results.appended), 1)
+        self.assertEqual(results.appended[0].name,
+                         '"The Martian" by A.Weir')
+
     def test_search_posts_search_body(self):
         install_transport(load_fixture('search_books_martian.json'))
         results = _Results()
@@ -367,6 +404,179 @@ class TestAlbumSearch(unittest.TestCase):
         self.assertEqual(r.name, '"The Martian" by A.Weir w/ R.C.Bray')
         detail_reqs = [req for req in HTTP.requests if req[0] == detail_url]
         self.assertEqual(len(detail_reqs), 1)
+
+    def test_manual_release_row_keeps_complete_narrator_list(self):
+        book_id = 'cccccccccccc'
+        detail_url = BASE + '/books/' + book_id + '?include=releases'
+        detail = {
+            'id': book_id,
+            'title': 'The Martian',
+            'releases': [{
+                'id': 'rel1',
+                'people': [
+                    {'role': {'name': 'Narrator'},
+                     'person': {'id': 'n1', 'name': 'Wil Wheaton'}},
+                    {'role': {'name': 'Narrator'},
+                     'person': {'id': 'n2', 'name': 'R.C. Bray'}},
+                ],
+            }],
+        }
+        install_transport([self._hit_without_narrator(book_id, 'The Martian')],
+                          {detail_url: (200, api_body(detail))})
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(), plex_shim.Locale.Language.English,
+            True)
+        self.assertEqual(len(results.appended), 1)
+        name = results.appended[0].name
+        self.assertIn('W.Wheaton', name)
+        self.assertIn('R.C.Bray', name)
+
+    def test_manual_release_row_count_stays_within_budget(self):
+        book_id = 'dddddddddddd'
+        detail_url = BASE + '/books/' + book_id + '?include=releases'
+        long_title = 'A Very Long Audiobook Title That Exceeds Display Limits'
+        long_author = 'Alexandria Bartholomew Christopher Davidson'
+        detail = {
+            'id': book_id,
+            'title': long_title,
+            'releases': [{
+                'id': 'rel1',
+                'people': [
+                    {'role': {'name': 'Narrator'},
+                     'person': {'id': 'n1',
+                                'name': 'Alexandria Verylongsurname'}},
+                    {'role': {'name': 'Narrator'},
+                     'person': {'id': 'n2',
+                                'name': 'Bartholomew Verylongsurname'}},
+                    {'role': {'name': 'Narrator'},
+                     'person': {'id': 'n3',
+                                'name': 'Christopher Verylongsurname'}},
+                ],
+            }],
+        }
+        hit = {
+            'id': book_id,
+            'title': long_title,
+            'people': [
+                {'role': {'name': 'Author'},
+                 'person': {'id': 'p1', 'name': long_author}},
+            ],
+            'originalLanguage': 'English',
+        }
+        install_transport([hit], {detail_url: (200, api_body(detail))})
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(album=long_title, artist=long_author),
+            plex_shim.Locale.Language.English, True)
+        self.assertEqual(len(results.appended), 1)
+        name = results.appended[0].name
+        # The count alone fits the remaining budget; it is not pushed past
+        # the 60-character description limit.
+        self.assertTrue(name.endswith('+3'), name)
+        self.assertLessEqual(len(name), 60)
+
+    def test_multi_release_work_row_hides_book_narrator(self):
+        book_id = 'eeeeeeeeeeee'
+        detail_url = BASE + '/books/' + book_id + '?include=releases'
+        detail = {
+            'id': book_id,
+            'title': 'The Martian',
+            'releases': [
+                {'id': 'rel1', 'people': [
+                    {'role': {'name': 'Narrator'},
+                     'person': {'id': 'n1', 'name': 'Release One'}},
+                ]},
+                {'id': 'rel2', 'people': [
+                    {'role': {'name': 'Narrator'},
+                     'person': {'id': 'n2', 'name': 'Release Two'}},
+                ]},
+            ],
+        }
+        hit = {
+            'id': book_id,
+            'title': 'The Martian',
+            'people': [
+                {'role': {'name': 'Author'},
+                 'person': {'id': 'p1', 'name': 'Andy Weir'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n0', 'name': 'Work Credit'}},
+            ],
+            'originalLanguage': 'English',
+        }
+        install_transport([hit], {detail_url: (200, api_body(detail))})
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(), plex_shim.Locale.Language.English,
+            True)
+        self.assertEqual(len(results.appended), 3)
+        self.assertNotIn('W.Credit', results.appended[0].name)
+        release_names = [r.name for r in results.appended[1:]]
+        self.assertTrue(any('R.One' in name for name in release_names))
+        self.assertTrue(any('R.Two' in name for name in release_names))
+
+    def test_multi_release_rows_keep_edition_discriminator(self):
+        book_id = 'gggggggggggg'
+        detail_url = BASE + '/books/' + book_id + '?include=releases'
+        title = 'A Fairly Long Audiobook Title'
+        narrators = [
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'n1', 'name': 'Wil Wheaton'}},
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'n2', 'name': 'R.C. Bray'}},
+        ]
+        detail = {
+            'id': book_id,
+            'title': title,
+            'releases': [
+                {'id': 'rel1', 'disambiguation': 'Unabridged 2011',
+                 'people': narrators},
+                {'id': 'rel2', 'disambiguation': 'Unabridged 2018',
+                 'people': narrators},
+            ],
+        }
+        hit = {
+            'id': book_id,
+            'title': title,
+            'people': [
+                {'role': {'name': 'Author'},
+                 'person': {'id': 'p1', 'name': 'A.Author'}},
+            ],
+            'originalLanguage': 'English',
+        }
+        install_transport([hit], {detail_url: (200, api_body(detail))})
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(album=title, artist='A.Author'),
+            plex_shim.Locale.Language.English, True)
+        by_id = dict((r.id, r) for r in results.appended)
+        one = by_id['book.' + book_id + '.release.rel1']
+        two = by_id['book.' + book_id + '.release.rel2']
+        self.assertIn('[Unabridged 2011]', one.name)
+        self.assertIn('[Unabridged 2018]', two.name)
+        self.assertNotEqual(one.name, two.name)
+        self.assertLessEqual(len(one.name), 60)
+        self.assertLessEqual(len(two.name), 60)
+
+    def test_plain_search_hit_keeps_book_narrator(self):
+        hit = {
+            'id': 'ffffffffffff',
+            'title': 'The Martian',
+            'people': [
+                {'role': {'name': 'Author'},
+                 'person': {'id': 'p1', 'name': 'Andy Weir'}},
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n0', 'name': 'Work Credit'}},
+            ],
+            'originalLanguage': 'English',
+        }
+        install_transport([hit])
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(), plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(len(results.appended), 1)
+        self.assertIn('W.Credit', results.appended[0].name)
 
     def test_manual_multiple_recordings_keep_work_choice_and_rank_editions(self):
         book_id = 'bbbbbbbbbbbb'
@@ -663,6 +873,32 @@ class TestArtistSearchAndUpdate(unittest.TestCase):
                                        'ja', False)
         self.assertEqual(results.appended[0].name, name)
         self.assertEqual(json.loads(HTTP.requests[0][3])['q'], name)
+    def test_same_name_people_stay_distinct_with_disambiguation(self):
+        hits = [
+            {'id': 'p1', 'name': 'Alex Smith',
+             'disambiguation': 'Narrator'},
+            {'id': 'p2', 'name': 'Alex Smith',
+             'disambiguation': 'Author'},
+        ]
+        install_transport(hits)
+        results = _Results()
+        agent.AudiobookArtist().search(
+            results, artist_media(artist='Alex Smith'),
+            plex_shim.Locale.Language.English, True)
+        self.assertEqual([r.id for r in results.appended],
+                         ['person.p1', 'person.p2'])
+        self.assertEqual(results.appended[0].name,
+                         'Alex Smith (Narrator)')
+        self.assertEqual(results.appended[1].name,
+                         'Alex Smith (Author)')
+
+    def test_person_without_disambiguation_shows_bare_name(self):
+        install_transport([{'id': 'p1', 'name': 'Alex Smith'}])
+        results = _Results()
+        agent.AudiobookArtist().search(
+            results, artist_media(artist='Alex Smith'),
+            plex_shim.Locale.Language.English, True)
+        self.assertEqual(results.appended[0].name, 'Alex Smith')
 
     def test_empty_artist_search_noop(self):
         # None and '' artist values short-circuit: the search completes

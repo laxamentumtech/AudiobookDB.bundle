@@ -90,6 +90,42 @@ To get a personal key, sign in at [audiobookdb.org](https://audiobookdb.org), op
 
 `store_series_as_collection` contributes series names without removing existing tags or collections. Series Mood tags remain in place. Plex server import and filtering of these collections have not been live-verified, so this preference is experimental.
 
+## Narrators and tags
+
+Album updates read every `Narrator` credit from the selected release
+(`release.people`) and write one Style tag per distinct narrator name. The
+complete credit list is retained with each credit's stable `person.id` when the
+catalog supplies one; tags are display text only. Two different people who
+share a display name produce two credits but one Style tag, because Plex
+deduplicates identical tag text. A forced refresh clears and re-adds narrator
+styles from the current release detail, so a catalog rename is reflected on the
+next forced update.
+
+Fix Match shows every narrator entry present in a search hit and the complete
+narrator list of each release row. When the complete list does not fit the
+description budget, the names that fit are followed by an explicit `+N`
+remaining count; the full list stays in the result data. Book-level search hits
+(the recorded case) carry authors only; the agent does not claim narrator
+completeness or borrow narrators from another release.
+
+Clickable narrator profiles (portrait, bio, discography) are not available
+through the Plex legacy music model: an album exposes only the album artist,
+and music collections have no details page. The upstream prerequisite is a
+Plex model/client change that exposes additional, client-rendered per-album
+people; no plugin-side change closes that gap. Narrator discovery therefore
+stops at Style tags and Fix Match display.
+
+## Release selection
+
+Album updates use a release pinned in the stored ID, a release matched by an
+ASIN resolve, or the only visible release. An unpinned book with multiple
+releases stays work-only; Fix Match keeps a work-only result and offers up to
+five recording rows, ranked by local runtime and language, but does not select
+an edition automatically. Accurate matches come from an ASIN in the filename
+or manual search field, or from an explicit `book.<id>.release.<id>` ID.
+Narrators are taken only from the selected release, never aggregated across
+releases.
+
 ## Quick match
 
 Enter an ASIN in the manual search field and the agent resolves it directly, skipping normal search. For automatic album matching, the agent also checks the scanner filename and all file parts supplied by Plex for ASINs. If those hints contain conflicting IDs, the agent does not select a recording by ASIN. Manual input overrides file hints:

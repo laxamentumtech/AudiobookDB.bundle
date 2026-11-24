@@ -5,8 +5,7 @@ from _version import version
 from logging import Logging
 import api_client
 from search_tools import (AlbumSearchTool, ArtistSearchTool, ScoreTool,
-                          append_narrator, image_thumb, release_narrator,
-                          release_year)
+                          image_thumb, release_narrators, release_year)
 import metadata_ids
 from update_tools import AlbumUpdateTool, ArtistUpdateTool
 
@@ -269,7 +268,11 @@ class AudiobookAlbum(Agent.Album):
             if len(releases) == 1:
                 self.append_album_match(search_helper, match, label, releases[0])
             else:
-                self.append_album_match(search_helper, match, label)
+                # A work-only choice sitting next to specific recordings
+                # must not imply release-credit completeness. Plain search
+                # hits keep their explicit book-level narrator display.
+                self.append_album_match(search_helper, match, label,
+                                        include_book_narrators=not releases)
                 if releases:
                     ranked = sorted(releases, key=lambda release:
                                     self.recording_rank(release, hints))
@@ -279,29 +282,29 @@ class AudiobookAlbum(Agent.Album):
                         recording['id'] = metadata_ids.serialize_book_id(
                             book_id, release['id'])
                         recording['score'] = match['score'] - (index + 1)
-                        recording_label = '%s [%s]' % (
-                            label, release.get('disambiguation') or index + 1)
+                        edition = ' [%s]' % (
+                            release.get('disambiguation') or index + 1)
                         self.append_album_match(search_helper, recording,
-                                                recording_label, release)
+                                                label, release, edition)
 
             if not manual and match['score'] >= GOOD_SCORE:
                 break
 
-    def append_album_match(self, helper, match, label, release=None):
+    def append_album_match(self, helper, match, label, release=None,
+                           edition='', include_book_narrators=True):
         thumb = match.get('thumb')
-        narrator = match.get('narrator')
+        narrator = match.get('narrator') if include_book_narrators else None
         year = None
         if release is not None:
-            narrator = release_narrator(release)
+            narrator = release_narrators(release)
             year = release_year(release)
             for image in release.get('images') or []:
                 cover = image_thumb(image)
                 if cover:
                     thumb = cover
                     break
-        if narrator:
-            label = append_narrator(label, helper.name_to_initials(narrator),
-                                    helper.lang)
+        label = helper.narrator_label(label, narrator, edition)
+
         helper.results.Append(MetadataSearchResult(
             id=match['id'], lang=helper.lang, name=label, score=match['score'],
             thumb=thumb, year=year))

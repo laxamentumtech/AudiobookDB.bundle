@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-`python:2.7-slim` in docker, full unittest discovery). 342 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 374 tests, 0 network.
 
 The test transport double (`tests/plex_shim.py`) has two modes: an
 eager default, and a `lazy=True` mode that mirrors Plex's real
@@ -20,19 +20,20 @@ contract is what gets exercised.
 | `api_client.py` | `test_api_client.py` |
 | `logging.py` | `test_logging.py` |
 | `metadata_ids.py` | `test_metadata_ids.py` |
+| `credits.py` | `test_update_tools.py`, `test_search_tools.py` (credit parsing) |
 | `search_tools.py` | `test_search_tools.py` |
 | `update_tools.py` | `test_update_tools.py` |
 | (sandbox compliance of every shipped module) | `test_sandbox_compliance.py` (8 tests: restricted names and builtins, augmented assignment rules, code-dir presence) |
 
-## `test_agent.py` (30 tests) — end-to-end agent flows
+## `test_agent.py` (39 tests) — end-to-end agent flows
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestStartAndIdentity` | 4 | `Start`, `ValidatePrefs`, `getDateFromString`, agent name/prefix constants |
-| `TestAlbumSearch` | 8 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all), manual edition rows (work-only + up to 5 ranked recordings with release cover/year) |
+| `TestAlbumSearch` | 15 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all), manual edition rows (work-only + up to 5 ranked recordings with release cover/year), complete narrator lists on search hits and release rows, explicit count within the 60-character budget, work-only rows narrator-free beside editions while plain hits keep book-level narrators, edition discriminators preserved in identical recording rows |
 | `TestAlbumQuickMatch` | 3 | `search` ASIN quick-match: album/filename ASIN → single 100-point result; unresolvable ASIN falls through |
 | `TestAlbumUpdate` | 9 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only), forced update with empty/null description keeps the existing summary and still writes title/studio/styles/native ID |
-| `TestArtistSearchAndUpdate` | 6 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID |
+| `TestArtistSearchAndUpdate` | 8 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID; same-name people stay distinct and show their disambiguation |
 
 ## `test_api_client.py` (61 tests)
 
@@ -70,42 +71,43 @@ contract is what gets exercised.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (124 tests)
+## `test_search_tools.py` (141 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
-| `TestCheckForAsinBooks` | 10 | album ASIN check: filename, album, and native `book.` ID sources (incl. release pair), release/ASIN/ID 404s, release without a book, and non-ID input → `False` |
+| `TestCheckForAsinBooks` | 11 | album ASIN check: filename, album, and native `book.` ID sources (incl. release pair with the complete narrator list), release/ASIN/ID 404s, release without a book, and non-ID input → `False` |
 | `TestFileAsinHints` | 8 | filename ASIN hints: detection, suffixes, non-ASIN ignored |
-| `TestCheckForAsinPeople` | 8 | artist ASIN check: sources, non-ASIN ignored |
+| `TestCheckForAsinPeople` | 9 | artist ASIN check: sources, non-ASIN ignored, disambiguation in native-ID quick match |
 | `TestSearchToolHelpers` | 5 | `validate_author_name`: clears bad, keeps good, sets primary author |
 | `TestAlbumSearchToolBody` | 6 | `build_search_body`: with/without artist filters, too-short → `None`, nothing → `None`, filters-only (short title + artist) |
 | `TestAlbumParentAuthor` | 6 | parent author ID wiring: matched native person ID as evidence, mismatch/absence tolerated |
 | `TestNameToInitials` | 5 | `name_to_initials`: full names, already abbreviated, multi-word |
+| `TestNarratorDisplay` | 11 | `format_narrators`/`narrator_label`: complete list when it fits, explicit `+N` remaining count, count-only output when no full name fits, base-label shortening, edition-suffix reservation, bounded no-narrator labels including an overlong suffix, `+1` fallback for an overlong single narrator even with distinct editions, and title retention for an intermediate-length name beside an edition |
 | `TestNormalizeName` | 6 | `normalize_name`: brackets/specials/words stripped, album→title fallback, diacritics, bracketed book number preserved (unbracketed) while non-number and mixed tags are stripped |
-| `TestAlbumParseApiResponse` | 7 | album `parse_api_response`: fixture hits, missing required keys, non-dict items, no narrator role, string-role credit skipped without dropping the hit |
+| `TestAlbumParseApiResponse` | 7 | album `parse_api_response`: fixture hits, missing required keys, non-dict items, no narrator role, string-role credit skipped without dropping the hit, all narrator credits retained, name-only author credits kept without invented IDs |
 | `TestPreSearchLogging` | 5 | `pre_search_logging`: missing album → track title, unknown album → `None`, manual |
 | `TestAlbumReleasesForBook` | 5 | `releases_for_book`: original dicts returned, duplicate IDs deduped, merged-book 301 to winner resolved, release for another book filtered, failure/empty → `[]` |
 | `TestRecordingHints` | 11 | `recording_hints`: track duration and language signals, partial/absent → `None`, unmapped stream code without a usable label → no hint, display label in the code field is a hint |
-| `TestImageAndDateHelpers` | 5 | `image_thumb`, `release_year` (non-text date → missing), `release_narrator`, `first_image_thumb` (first usable image, not just the first) |
+| `TestImageAndDateHelpers` | 5 | `image_thumb`, `release_year` (non-text date → missing), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
 | `TestArtistSearchToolBody` | 2 | `build_search_body` (artist): body, too-short → `None` |
 | `TestCleanupAuthorName` | 4 | `cleanup_author_name`: role removals, diacritics |
 | `TestArtistMultiArtist` | 5 | `find_non_contributor`, `handle_multi_artist`, `get_primary_author` |
-| `TestArtistParseApiResponse` | 2 | artist `parse_api_response`: fixture, missing keys rejected |
-| `TestScoreTool` | 24 | scoring: subtitle + coauthor full-match evidence, four same-base wrong-volume targets available only in Fix Match, bracketed book number rejects an unnumbered same base (auto), accent-folded stem rejects a number conflict (comparison path only), prefixed/accented series title resolves a book-number conflict, ranged and disjoint-set series positions, legacy ordinal only when position is missing, explicit unknown/partial positions abstain for unnumbered titles but do not hide a same-stem title-number conflict, partial coverage is never support, fractional and non-finite ordinals/spans abstain, malformed/reversed spans are not contradictions, literal title number precedence, unrelated series/edition numbers tolerated, unrelated title numbers do not override membership, bare title + wrong author rejected, parent author ID evidence (match/mismatch/absence), relaxed author caps the name penalty at twenty, thumb carried without score change |
+| `TestArtistParseApiResponse` | 3 | artist `parse_api_response`: fixture, disambiguation parsed, missing keys rejected |
+| `TestScoreTool` | 27 | scoring: subtitle + coauthor full-match evidence, four same-base wrong-volume targets available only in Fix Match, bracketed book number rejects an unnumbered same base (auto), accent-folded stem rejects a number conflict (comparison path only), prefixed/accented series title resolves a book-number conflict, ranged and disjoint-set series positions, legacy ordinal only when position is missing, explicit unknown/partial positions abstain for unnumbered titles but do not hide a same-stem title-number conflict, partial coverage is never support, fractional and non-finite ordinals/spans abstain, malformed/reversed spans are not contradictions, literal title number precedence, unrelated series/edition numbers tolerated, unrelated title numbers do not override membership, bare title + wrong author rejected, parent author ID evidence (match/mismatch/absence), relaxed author caps the name penalty at twenty, thumb carried without score change, complete narrator list retained, name-only author credit still scores, disambiguation is display-only |
 
-## `test_update_tools.py` (80 tests)
+## `test_update_tools.py` (86 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestAlbumResolveLegacyAsin` | 3 | album `resolve_item`: legacy migration (populates, stashes native IDs), 404 untouched |
-| `TestAlbumResolveNative` | 11 | album `resolve_item`: book+release pinned, book-only multi-edition stays work-only, single-release 404 → work-only, mismatched pinned release rejected, pinned release 404 preserved, merged-book canonical detail ID replaces the stored loser ID (work-only and pinned), pinned release with `book: null` fails closed, unpinned release with `book: null` falls back to work-only, book 404 preserved, wrong-type invalid |
-| `TestAlbumParseApiResponse` | 7 | album `parse_api_response`: series, no-releases work-only, audible chip rating (absent/non-first), missing cover → empty thumb, null/absent person names filtered from author/narrator lists, non-mapping `chapterDetail` / non-list `chapters` → no chapter data |
+| `TestAlbumResolveNative` | 12 | album `resolve_item`: book+release pinned, book-only multi-edition stays work-only, single-release 404 → work-only, mismatched pinned release rejected, pinned release 404 preserves title/styles/moods, pinned release narrators isolated from alternate editions, merged-book canonical detail ID replaces the stored loser ID (work-only and pinned), pinned release with `book: null` fails closed, unpinned release with `book: null` falls back to work-only, book 404 preserved, wrong-type invalid |
+| `TestAlbumParseApiResponse` | 9 | album `parse_api_response`: series, no-releases work-only, audible chip rating (absent/non-first), missing cover → empty thumb, null/absent person names filtered, ID-backed credits deduped by scope/person/role, dual-role person kept in both sets, non-mapping `chapterDetail` / non-list `chapters` → no chapter data |
 | `TestReleaseSelection` | 3 | `select_release`: only release selected, multi-edition → work-only, no releases → `None` |
 | `TestArtistResolve` | 5 | artist `resolve_item`: legacy migration, native person, 404 untouched, ambiguous ASIN untouched, wrong-type invalid |
 | `TestUpdateToolHelpers` | 8 | `cleanup_html` (books/authors), `replace_html_special`, `collect_metadata_to_log` (books + authors), `collect_metadata_arrs_to_log` (legacy typo), `getDateFromString`, `volume_prefix` |
 | `TestAlbumSetters` | 23 | `set_metadata_title` (+subtitle), `set_metadata_rating` (x2, none no-op), `set_metadata_date` guard, `set_metadata_studio`, `set_metadata_summary` (+ empty/whitespace/markup-only description preserves an existing summary and is logged; forced and non-forced assignment unchanged), `set_metadata_sort_title` (+series), `set_metadata_tags` (+keep existing genres), `set_metadata_series_collections` (no container → warning, not silent), `set_metadata_chapters` (overlapping — out-of-order and identical — and one-based-ordinal sequences rejected before any title write; in-order sequence rewrites generic titles) |
 | `TestArtistSetters` | 15 | `set_metadata_title`, `set_metadata_description` (+ same keep-existing-on-empty policy as the album setter), `set_metadata_sort_title` (last name/JR/single word), `set_metadata_tags`, `set_empty_variables` |
-| `TestTagTool` | 5 | `TagTool` force-clears narrators (styles preserved when there are no narrators to re-add), non-force keeps existing, author/contributor handling, `similar=None` no-op |
+| `TestTagTool` | 8 | `TagTool` force-clears narrators (styles preserved when there are no narrators to re-add), multiple narrators → separate styles, same-name collapse, forced rename refresh, non-force keeps existing, author/contributor handling, `similar=None` no-op |
 
 ## Legacy → new equivalence (legacy ref: Audnexus.bundle)
 

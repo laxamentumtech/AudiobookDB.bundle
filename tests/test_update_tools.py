@@ -155,8 +155,10 @@ class TestAlbumResolveLegacyAsin(unittest.TestCase):
         self.assertEqual(tool.native_release_id, 'dPL9fC7YnK8X')
         self.assertEqual(tool.title, 'The Martian')
         self.assertEqual(tool.studio, 'Podium Publishing')
-        self.assertEqual(tool.narrator, [{'name': 'R.C. Bray'}])
-        self.assertEqual(tool.author, [{'name': 'Andy Weir'}])
+        self.assertEqual(tool.narrator, [
+            {'id': 'HKxn6QeChR9j', 'name': 'R.C. Bray'}])
+        self.assertEqual(tool.author, [
+            {'id': 'ypMPwXzWXaiX', 'name': 'Andy Weir'}])
         self.assertEqual(str(tool.date), '2013-03-22')
         # audible chip selected (not the first openlibrary chip)
         self.assertEqual(tool.rating, 4.8)
@@ -194,7 +196,8 @@ class TestAlbumResolveLegacyAsin(unittest.TestCase):
         self.assertIsNone(tool.native_release_id)
         # Work-level metadata was populated from the book detail.
         self.assertEqual(tool.title, 'The Martian')
-        self.assertEqual(tool.author, [{'name': 'Andy Weir'}])
+        self.assertEqual(tool.author, [
+            {'id': 'ypMPwXzWXaiX', 'name': 'Andy Weir'}])
         # Release-only fields stay empty: no studio, date, or narrator.
         self.assertEqual(tool.studio, '')
         self.assertIsNone(tool.date)
@@ -259,11 +262,40 @@ class TestAlbumResolveNative(unittest.TestCase):
     def test_pinned_release_404_preserved(self):
         install_transport(self._transport())
         meta = FakeMetadata('book.WQQDcMBQ3qUT.release.missing123')
+        meta.styles.add('Old Style')
+        meta.moods.add('Old Mood')
         tool = make_album('book.WQQDcMBQ3qUT.release.missing123',
                           metadata=meta)
         self.assertFalse(tool.resolve_item())
         self.assertEqual(meta.id, 'book.WQQDcMBQ3qUT.release.missing123')
         self.assertEqual(meta.title, None)
+        self.assertEqual(meta.styles, {'Old Style'})
+        self.assertEqual(meta.moods, {'Old Mood'})
+
+    def test_pinned_release_narrators_are_isolated(self):
+        transport = self._transport()
+        pinned = load_fixture(RELEASE_DETAIL)
+        pinned['people'] = [
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'n2', 'name': 'Wil Wheaton'}},
+        ]
+        transport[BASE + '/releases/dPL9fC7YnK8X'] = (
+            200, api_body(pinned))
+        install_transport(transport)
+
+        pinned_tool = make_album(
+            'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        self.assertTrue(pinned_tool.resolve_item())
+        self.assertEqual(pinned_tool.native_release_id, 'dPL9fC7YnK8X')
+        self.assertEqual(pinned_tool.narrator,
+                         [{'id': 'n2', 'name': 'Wil Wheaton'}])
+
+        # An unpinned multi-release book stays work-only: it must not
+        # borrow narrators from an arbitrary release.
+        fallback_tool = make_album('book.WQQDcMBQ3qUT')
+        self.assertTrue(fallback_tool.resolve_item())
+        self.assertIsNone(fallback_tool.native_release_id)
+        self.assertEqual(fallback_tool.narrator, [])
 
     def test_merged_book_canonical_detail_id_replaces_stored_loser_id(self):
         # The stored ID belongs to a merged (loser) book; the detail
@@ -335,7 +367,8 @@ class TestAlbumResolveNative(unittest.TestCase):
         self.assertIsNone(tool.native_release_id)
         # Work-level metadata was populated from the book detail.
         self.assertEqual(tool.title, 'The Martian')
-        self.assertEqual(tool.author, [{'name': 'Andy Weir'}])
+        self.assertEqual(tool.author, [
+            {'id': 'ypMPwXzWXaiX', 'name': 'Andy Weir'}])
         # Release-only fields stay empty: no studio, date, or narrator.
         self.assertEqual(tool.studio, '')
         self.assertIsNone(tool.date)
@@ -380,7 +413,8 @@ class TestAlbumParseApiResponse(unittest.TestCase):
         self.assertIsNone(tool.date)
         self.assertEqual(tool.studio, '')
         self.assertEqual(tool.narrator, [])
-        self.assertEqual(tool.author, [{'name': 'Andy Weir'}])
+        self.assertEqual(tool.author, [
+            {'id': 'ypMPwXzWXaiX', 'name': 'Andy Weir'}])
 
     def test_no_audible_chip_rating_none(self):
         book = load_fixture(BOOK_DETAIL)
@@ -416,8 +450,46 @@ class TestAlbumParseApiResponse(unittest.TestCase):
         install_transport({})
         tool = make_album()
         tool.parse_api_response(book, release)
-        self.assertEqual(tool.author, [{'name': 'Andy Weir'}])
-        self.assertEqual(tool.narrator, [{'name': 'R.C. Bray'}])
+        self.assertEqual(tool.author, [
+            {'id': 'ypMPwXzWXaiX', 'name': 'Andy Weir'}])
+        self.assertEqual(tool.narrator, [
+            {'id': 'HKxn6QeChR9j', 'name': 'R.C. Bray'}])
+
+    def test_credit_ids_preserved_and_deduped_by_scope_role(self):
+        book = load_fixture(BOOK_DETAIL)
+        release = load_fixture(RELEASE_DETAIL)
+        release['people'] = [
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'n1', 'name': 'Wil Wheaton'}},
+            # Same person/role in the same scope: one credit.
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'n1', 'name': 'Wil Wheaton'}},
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'n2', 'name': 'R.C. Bray'}},
+        ]
+        install_transport({})
+        tool = make_album()
+        tool.parse_api_response(book, release)
+        self.assertEqual(tool.narrator, [
+            {'id': 'n1', 'name': 'Wil Wheaton'},
+            {'id': 'n2', 'name': 'R.C. Bray'}])
+
+    def test_same_person_author_and_narrator_stay_distinct(self):
+        book = load_fixture(BOOK_DETAIL)
+        release = load_fixture(RELEASE_DETAIL)
+        book['people'] = [
+            {'role': {'name': 'Author'},
+             'person': {'id': 'p1', 'name': 'Alex Smith'}},
+        ]
+        release['people'] = [
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'p1', 'name': 'Alex Smith'}},
+        ]
+        install_transport({})
+        tool = make_album()
+        tool.parse_api_response(book, release)
+        self.assertEqual(tool.author, [{'id': 'p1', 'name': 'Alex Smith'}])
+        self.assertEqual(tool.narrator, [{'id': 'p1', 'name': 'Alex Smith'}])
 
     def test_audible_chip_not_first(self):
         book = load_fixture(BOOK_DETAIL)
@@ -1033,6 +1105,44 @@ class TestTagTool(unittest.TestCase):
         tagger = TagTool(tool, Prefs)
         tagger.add_narrators_to_styles()
         self.assertEqual(tool.metadata.styles, {'Old Style'})
+
+    def test_multiple_narrators_become_separate_styles(self):
+        tool = self._album_tool(force=True)
+        tool.set_empty_variables()
+        tool.metadata.styles.add('Old Style')
+        tool.narrator = [
+            {'id': 'n1', 'name': 'Wil Wheaton'},
+            {'id': 'n2', 'name': 'R.C. Bray'},
+        ]
+        tool.author = [{'id': 'a1', 'name': 'Andy Weir'}]
+        tool.set_metadata_tags()
+        self.assertEqual(tool.metadata.styles,
+                         {'Wil Wheaton', 'R.C. Bray'})
+
+    def test_same_name_narrators_collapse_to_one_style(self):
+        tool = self._album_tool(force=True)
+        tool.set_empty_variables()
+        # Two distinct people with the same display name: both credits
+        # survive, but Plex tags dedupe identical text.
+        tool.narrator = [
+            {'id': 'n1', 'name': 'Alex Smith'},
+            {'id': 'n2', 'name': 'Alex Smith'},
+        ]
+        TagTool(tool, Prefs).add_narrators_to_styles()
+        self.assertEqual(tool.metadata.styles, {'Alex Smith'})
+
+    def test_forced_refresh_reflects_renamed_narrator(self):
+        tool = self._album_tool(force=True)
+        tool.set_empty_variables()
+        tagger = TagTool(tool, Prefs)
+        tool.narrator = [{'id': 'n1', 'name': 'Old Name'}]
+        tagger.add_narrators_to_styles()
+        self.assertEqual(tool.metadata.styles, {'Old Name'})
+        # The forced refresh re-reads the display name; identity is the
+        # same person ID, so names are never used for matching.
+        tool.narrator = [{'id': 'n1', 'name': 'New Name'}]
+        tagger.add_narrators_to_styles()
+        self.assertEqual(tool.metadata.styles, {'New Name'})
 
     def test_add_narrators_empty_keeps_styles(self):
         # Forced work-only update (no release -> no narrators): existing
