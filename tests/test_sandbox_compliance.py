@@ -379,6 +379,19 @@ class SandboxComplianceTest(unittest.TestCase):
                 '(RestrictedPython checkName/checkAttrName) -- rename them:\n'
                 + '\n'.join(problems))
 
+    def test_shipped_code_has_no_augmented_item_or_attribute_assignments(self):
+        problems = []
+        for display, source in shipped_sources():
+            for node in ast.walk(parse_source(source)):
+                if isinstance(node, ast.AugAssign) and isinstance(
+                        node.target, (ast.Attribute, ast.Subscript)):
+                    problems.append('%s:%d' % (display, node.lineno))
+        if problems:
+            self.fail(
+                'Plex rejects augmented assignment to attributes, items, '
+                'and slices; use ordinary assignment instead:\n'
+                + '\n'.join(problems))
+
     def test_builtin_checker_flags_unavailable_names(self):
         hits = unavailable_builtin_uses(BUILTIN_SOURCE)
         self.assertEqual(

@@ -1,4 +1,6 @@
+# -*- coding: utf-8 -*-
 import re
+import unicodedata
 
 # Import internal tools
 from logging import Logging
@@ -14,7 +16,135 @@ try:
 except ImportError:  # pragma: no cover - python 2
     import urllib as url_parse
 
+# Typed lookups keep the legacy broad grammar: users may paste any
+# ten-character ID-shaped token.
 asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
+
+# Scanner filenames are untrusted bulk input: only the conventional
+# Audible ASIN (B + 9 alphanumerics) counts as an edition hint, bounded so
+# a hash or hex run is never read as one.
+file_asin_regex = re.compile(
+    r'(?<![A-Za-z0-9])B[A-Za-z0-9]{9}(?![A-Za-z0-9])', re.IGNORECASE)
+
+YEAR_PREFIX = re.compile(r'\A\s*(\d{4})')
+
+# Stream language codes map to the catalog's display names
+# (release language.name) so the two can be compared softly.
+STREAM_LANGUAGE_NAMES = {
+    'en': 'English', 'eng': 'English',
+    'de': 'German', 'deu': 'German', 'ger': 'German',
+    'fr': 'French', 'fra': 'French', 'fre': 'French',
+    'it': 'Italian', 'ita': 'Italian',
+    'es': 'Spanish', 'spa': 'Spanish',
+    'ja': 'Japanese', 'jpn': 'Japanese',
+}
+
+
+def release_year(release):
+    """
+        Year of an explicitly identified release, or None.
+    """
+    if not isinstance(release, dict):
+        return None
+    value = release.get('releaseDate')
+    if not value:
+        return None
+    try:
+        match = YEAR_PREFIX.match(value)
+    except TypeError:
+        # A non-text releaseDate (e.g. a bare year number) has no year.
+        return None
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def image_thumb(image):
+    """
+        Small derivative URL for a catalog image, or None.
+
+        The image URL is data from the API, so the composed derivative is
+        re-validated before it is handed to Plex.
+    """
+    if not isinstance(image, dict):
+        return None
+    url = image.get('url')
+    if not url:
+        return None
+    thumb = url.rstrip('/') + '/small.jpg'
+    if api_client.trusted_image_url(thumb):
+        return thumb
+    return None
+
+
+def first_image_thumb(images):
+    if not images:
+        return None
+    for image in images:
+        thumb = image_thumb(image)
+        if thumb:
+            return thumb
+    return None
+
+
+def book_thumb(book):
+    """
+        First usable small cover derivative for a book summary.
+    """
+    thumb = image_thumb(book.get('coverImage'))
+    if thumb:
+        return thumb
+    return first_image_thumb(book.get('images'))
+
+
+def language_name(value):
+    """
+        Normalizes a stream language code or name to a catalog name.
+    """
+    if not value:
+        return None
+    key = value.strip().lower()
+    if not key:
+        return None
+    if key in STREAM_LANGUAGE_NAMES:
+        return STREAM_LANGUAGE_NAMES[key]
+    for name in STREAM_LANGUAGE_NAMES.values():
+        if name.lower() == key:
+            return name
+    return value.strip()
+
+
+def release_narrator(release):
+    for credit in release.get('people') or []:
+        if not isinstance(credit, dict):
+            continue
+        if (credit.get('role') or {}).get('name') == 'Narrator':
+            name = ((credit.get('person') or {}).get('name') or '').strip()
+            if name:
+                return name
+    return None
+
+
+def book_narrator(book, release_id=None):
+    releases = book.get('releases') or []
+    if release_id:
+        for release in releases:
+            if release.get('id') == release_id:
+                return release_narrator(release)
+    elif len(releases) == 1:
+        return release_narrator(releases[0])
+    return None
+
+
+NARRATOR_SEPARATOR = {
+    'de': 'mit', 'fr': 'ac', 'it': 'con', 'es': 'con', 'ja': u'\u8aad\u307f',
+}
+
+
+def append_narrator(label, narrator, lang):
+    if not narrator:
+        return label
+    return '%s %s %s' % (label, NARRATOR_SEPARATOR.get(lang, 'w/'), narrator)
 
 
 class SearchTool:
@@ -26,6 +156,70 @@ class SearchTool:
         self.prefs = prefs
         self.results = results
 
+    def local_file_parts(self):
+        """
+            Local media parts from the scanner's tree, when PMS supplied it.
+            Album trees expose parts under tracks; other levels own items.
+        """
+        try:
+            tree = self.media.tree
+        except AttributeError:
+            return []
+        if not tree:
+            return []
+        parts = []
+        try:
+            items = tree.items
+        except AttributeError:
+            items = []
+        for item in items:
+            parts.extend(item.parts or [])
+        # The index-keyed track map can drop tracks with the same number
+        # on different discs. The children list keeps every track.
+        try:
+            tracks = tree.children
+        except AttributeError:
+            tracks = []
+        for track in tracks:
+            for item in track.items:
+                parts.extend(item.parts or [])
+        return parts
+
+    def asin_matches(self, value):
+        """
+            Conventional Audible ASINs in a scanner name or path.
+        """
+        if not value:
+            return []
+        try:
+            value = url_parse.unquote(value)
+        except Exception as e:
+            log.error('Error unquoting filename for ASIN: %s', e)
+        return [match.group(0) for match in file_asin_regex.finditer(value)]
+
+    def file_asins(self):
+        """
+            Unique ASINs hinted by the scanner: album filename plus every
+            local file part. Empty when no tree or filename is available.
+        """
+        names = []
+        if self.media.filename:
+            names.append(self.media.filename)
+        for part in self.local_file_parts():
+            try:
+                file_name = part.file
+            except AttributeError:
+                continue
+            if file_name:
+                names.append(file_name)
+        asins = []
+        for name in names:
+            for match in self.asin_matches(name):
+                asin = match.upper()
+                if asin not in asins:
+                    asins.append(asin)
+        return asins
+
     def check_for_asin(self):
         """
             Checks filename (for books) and/or search query for a
@@ -35,23 +229,18 @@ class SearchTool:
             the result(s) itself and returns True when the caller must
             stop the normal search, False to continue.
         """
-        # Check filename for ASIN if content type is books. A manual
-        # (Fix Match) query takes precedence over the scanner's filename
-        # hint, so the user can correct a wrong filename ASIN.
-        if self.media.filename and self.content_type == 'books' \
-                and not self.manual:
-            try:
-                # Provide a plain filename for ASIN search
-                filename_unquoted = url_parse.unquote(self.media.filename)
-                filename_unquoted = self.search_asin(filename_unquoted)
-            except Exception as e:
-                log.error('Error checking filename for ASIN: %s', e)
-                filename_unquoted = None
-
-            if filename_unquoted:
-                log.info('ASIN found in filename')
-                return self.append_quick_match_book(
-                    filename_unquoted.group(0))
+        # Check scanner file hints for an ASIN if content type is books. A
+        # manual (Fix Match) query takes precedence over those hints, so
+        # the user can correct a wrong filename ASIN. Conflicting file
+        # ASINs are ambiguous evidence: never look one up.
+        if self.content_type == 'books' and not self.manual:
+            asins = self.file_asins()
+            if len(asins) > 1:
+                log.info('Conflicting file ASINs. Not quick-matching.')
+                return False
+            if asins:
+                log.info('ASIN found in file metadata')
+                return self.append_quick_match_book(asins[0])
 
         # Check search query for an ID
         # Default to album and use artist if no album
@@ -72,7 +261,7 @@ class SearchTool:
         # Legacy ASIN quick match
         match = self.search_asin(manual_input)
         if match:
-            asin = match.group(0)
+            asin = match.group(0).upper()
             log.info('ASIN found in manual search')
             if self.content_type == 'books':
                 return self.append_quick_match_book(asin)
@@ -92,14 +281,29 @@ class SearchTool:
         if book is None:
             log.info('ASIN %s not in AudiobookDB catalog' % asin)
             return False
+        title = book.get('title')
+        if self.manual:
+            title = append_narrator(
+                title, book_narrator(book, matched_release_id), self.lang)
+        year = book.get('copyright')
+        thumb = book_thumb(book)
+        if matched_release_id:
+            for release in book.get('releases') or []:
+                if not isinstance(release, dict) \
+                        or release.get('id') != matched_release_id:
+                    continue
+                year = release_year(release) or year
+                thumb = first_image_thumb(release.get('images')) or thumb
+                break
         self.results.Append(
             MetadataSearchResult(
                 id=metadata_ids.serialize_book_id(
                     book['id'], matched_release_id),
                 lang=self.lang,
-                name=book.get('title'),
+                name=title,
                 score=100,
-                year=book.get('copyright'),
+                year=year,
+                thumb=thumb,
             )
         )
         return True
@@ -113,23 +317,33 @@ class SearchTool:
         if book is None:
             log.info('Book %s not found' % book_id)
             return False
+        title = book.get('title')
+        year = book.get('copyright')
+        thumb = book_thumb(book)
         if release_id:
             release = api_client.get_release(release_id)
             if release is None:
                 log.info('Release %s not found' % release_id)
                 return False
             release_book_id = (release.get('book') or {}).get('id')
-            if release_book_id and release_book_id != book.get('id'):
+            if release_book_id != book.get('id'):
                 log.info('Release %s does not belong to book %s' % (
                     release_id, book_id))
                 return False
+            if self.manual:
+                title = append_narrator(title, release_narrator(release), self.lang)
+            year = release_year(release) or year
+            thumb = first_image_thumb(release.get('images')) or thumb
+        elif self.manual:
+            title = append_narrator(title, book_narrator(book), self.lang)
         self.results.Append(
             MetadataSearchResult(
                 id=metadata_ids.serialize_book_id(book['id'], release_id),
                 lang=self.lang,
-                name=book.get('title'),
+                name=title,
                 score=100,
-                year=book.get('copyright'),
+                year=year,
+                thumb=thumb,
             )
         )
         return True
@@ -242,27 +456,155 @@ class SearchTool:
 
 
 class AlbumSearchTool(SearchTool):
-    def build_search_body(self):
-        """
-            Builds the search body for the API call.
-            Returns None when there is nothing to search for.
-        """
-        # First, normalize the name
-        self.normalize_name()
+    # Avoid fetching live release schedules or fields unused for matching.
+    SEARCH_FIELDS = ['id', 'title', 'subtitle', 'people', 'seriesWithId',
+                     'image']
 
-        body = {'type': 'books'}
-        filters = {}
-        # Fix match/manual search doesn't provide author
-        if self.media.artist:
-            filters['person'] = self.media.artist
-        if self.normalizedName \
-                and len(self.normalizedName) >= api_client.MIN_QUERY_LENGTH:
-            body['q'] = self.normalizedName
-        if filters:
-            body['filters'] = filters
-        if 'q' not in body and not filters:
+    def parent_author_id(self):
+        """
+            Native person ID from the album's parent artist, or None.
+        """
+        try:
+            raw = self.media.parent_metadata.id
+        except AttributeError:
             return None
+        parsed = metadata_ids.parse_metadata_id(raw, 'authors')
+        if parsed[0] == 'person':
+            return parsed[1]
+        return None
+
+    def build_search_body(self):
+        query = self.normalize_name()
+        artist = (self.media.artist or '').strip()
+        if not query:
+            return None
+        short_query = len(query) < api_client.MIN_QUERY_LENGTH
+        body = {'q': query, 'type': 'books'}
+        # A native parent person ID is authoritative author evidence. An
+        # exact name filter can hide the right work when local and catalog
+        # credit spellings differ, so a full-length title is searched
+        # without it. Short titles need the filter to be accepted at all.
+        if short_query:
+            if not artist:
+                return None
+            body['filters'] = {'person': artist, 'role': 'Author'}
+        elif artist and not self.parent_author_id():
+            body['filters'] = {'person': artist, 'role': 'Author'}
         return body
+
+    def releases_for_book(self, book_id):
+        """
+            Release dicts that belong to one book, [] when the detail is
+            unusable. The single GET supplies the manual-edition rows; the
+            original dicts are returned unchanged so renderers keep every
+            field (people, images, language, disambiguation).
+        """
+        if not book_id:
+            return []
+        book = api_client.get_book(book_id, include='releases')
+        if not book:
+            return []
+        # A merged book 301s to the canonical winner; releases reference
+        # the winner's id, so the response's id is the comparison key.
+        canonical_id = book.get('id') or book_id
+        releases = []
+        seen = []
+        for release in book.get('releases') or []:
+            if not isinstance(release, dict) or not release.get('id'):
+                continue
+            release_book_id = (release.get('book') or {}).get('id')
+            if release_book_id and release_book_id != canonical_id:
+                continue
+            if release['id'] in seen:
+                continue
+            seen.append(release['id'])
+            releases.append(release)
+        return releases
+
+    def recording_hints(self):
+        """
+            Soft recording hints: (total track duration in ms, release
+            language name). Either side is None when the tree does not
+            expose a complete, consistent signal.
+        """
+        return (self.track_duration_ms(), self.file_language_name())
+
+    def track_duration_ms(self):
+        """
+            Sum of every track duration, None when any is missing.
+        """
+        try:
+            tracks = self.media.tree.children
+        except AttributeError:
+            return None
+        if not tracks:
+            return None
+        total = 0
+        for track in tracks:
+            try:
+                duration = int(track.duration)
+            except (AttributeError, TypeError, ValueError):
+                return None
+            if duration <= 0:
+                return None
+            total += duration
+        return total
+
+    def stream_language_name(self, stream):
+        try:
+            code = stream.languageCode
+        except AttributeError:
+            code = None
+        key = None
+        if code:
+            key = code.strip().lower()
+        if key in STREAM_LANGUAGE_NAMES:
+            return STREAM_LANGUAGE_NAMES[key]
+        try:
+            label = stream.language
+        except AttributeError:
+            label = None
+        name = language_name(label)
+        if name:
+            return name
+        # A display label carried in the code field (e.g. 'English') is a
+        # usable hint; an unmapped code (e.g. 'und') is not.
+        if key:
+            for name in STREAM_LANGUAGE_NAMES.values():
+                if name.lower() == key:
+                    return name
+        return None
+
+    def file_language_name(self):
+        """
+            Consistent audio stream language across all local parts, or
+            None when none is exposed, one is missing, or they disagree.
+        """
+        names = []
+        for part in self.local_file_parts():
+            try:
+                streams = part.streams or []
+            except AttributeError:
+                return None
+            found_audio = False
+            for stream in streams:
+                try:
+                    stream_type = str(stream.type)
+                except AttributeError:
+                    continue
+                if stream_type != '2':
+                    continue
+                found_audio = True
+                name = self.stream_language_name(stream)
+                if not name:
+                    return None
+                if name not in names:
+                    names.append(name)
+            if not found_audio:
+                return None
+        if len(names) != 1:
+            return None
+        return names[0]
 
     def name_to_initials(self, input_name):
         """
@@ -304,32 +646,24 @@ class AlbumSearchTool(SearchTool):
             Normalizes the album name by removing
             unwanted characters and words.
         """
-        # Get name from either album or title
-        input_name = self.media.album if self.media.album else self.media.title
-        log.debug('Input Name: %s', input_name)
+        input_name = self.media.album or self.media.title or ''
 
-        if not input_name:
-            self.normalizedName = ''
-            return self.normalizedName
+        def strip_bracket_tag(match):
+            # Keep a bracketed book number (e.g. [Book 2]) as scoring
+            # evidence, unbracketed, so the trailing digit stays visible
+            # to the book-number conflict check; strip every other
+            # bracketed tag (e.g. [2017], [Book Club]).
+            bracket = match.group(0)
+            if re.search(r'\bbook\s+\d+', bracket, re.IGNORECASE):
+                return ' ' + bracket.strip('[]') + ' '
+            return ' '
 
-        # Remove Diacritics
-        name = String.StripDiacritics(input_name)
-        # Remove brackets and text inside
-        name = re.sub(r'\[[^"]*\]', '', name)
-        # Remove unwanted characters
-        name = re.sub(r'[^\w\s]', '', name)
-        # Remove unwanted words
-        name = re.sub(r'\b(official|audiobook|unabridged|abridged)\b',
-                      '', name, flags=re.IGNORECASE)
-        # Remove unwanted whitespaces
-        name = re.sub(r'\s+', ' ', name)
-        # Remove leading and trailing whitespaces
-        name = name.strip()
-        # Set class variable
-        self.normalizedName = name
-        log.debug('Normalized Name: %s', self.normalizedName)
-
-        return name
+        name = re.sub(r'\[[^\]]*\]', strip_bracket_tag, input_name)
+        name = re.sub(r'\(\s*(?:unabridged|abridged|audiobook)\s*\)',
+                      ' ', name, flags=re.IGNORECASE)
+        name = re.sub(r'\s+audiobook\s*$', '', name, flags=re.IGNORECASE)
+        self.normalizedName = ' '.join(name.split())
+        return self.normalizedName
 
     def parse_api_response(self, api_response):
         """
@@ -338,31 +672,37 @@ class AlbumSearchTool(SearchTool):
         """
         search_results = []
         for item in api_response:
-            # Only append results which have valid keys
-            if isinstance(item, dict) and \
-                    set(item.keys()) >= {'id', 'title', 'people'}:
-                authors = [
-                    {'name': p['person']['name']}
-                    for p in item.get('people') or []
-                    if (p.get('role') or {}).get('name') == 'Author'
-                ]
-                narrator = []
-                for p in item.get('people') or []:
-                    if (p.get('role') or {}).get('name') == 'Narrator':
-                        narrator = [{'name': p['person']['name']}]
-                        break
-                search_results.append(
-                    {
-                        'book_id': metadata_ids.serialize_book_id(
-                            item['id']),
-                        'author': authors,
-                        'date': None,
-                        'language': item.get('originalLanguage'),
-                        'narrator': narrator,
-                        'title': item['title'],
-                        'subtitle': item.get('subtitle'),
-                    }
-                )
+            if not isinstance(item, dict) or not item.get('id') or not item.get('title'):
+                continue
+            authors = []
+            narrator = []
+            for credit in item.get('people') or []:
+                if not isinstance(credit, dict):
+                    continue
+                person = credit.get('person')
+                role = credit.get('role')
+                if not isinstance(person, dict) or not isinstance(role, dict):
+                    continue
+                name = person.get('name')
+                role_name = role.get('name')
+                if not name:
+                    continue
+                if role_name == 'Author':
+                    author = {'name': name}
+                    if person.get('id'):
+                        author['id'] = person['id']
+                    authors.append(author)
+                elif role_name == 'Narrator' and not narrator:
+                    narrator = [{'name': name}]
+            search_results.append({
+                'book_id': metadata_ids.serialize_book_id(item['id']),
+                'author': authors,
+                'narrator': narrator,
+                'title': item['title'],
+                'subtitle': item.get('subtitle'),
+                'series': item.get('seriesWithId') or [],
+                'thumb': image_thumb(item.get('image')),
+            })
         return search_results
 
     def pre_search_logging(self):
@@ -546,210 +886,196 @@ class ArtistSearchTool(SearchTool):
             log.error("No artist to validate")
 
 
+# Interpret only a trailing bare number or "Book N". Years, edition packs,
+# ranges and fractional positions in titles are not single book numbers.
+BOOK_NUMBER = re.compile(r'^(.+?)[\s,:]+(?:book\s*#?\s*)?([0-9]{1,3})$',
+                         re.IGNORECASE)
+NON_BOOK_SUFFIX = re.compile(u'(?:\\b(?:vol\\.?|volume|pack|to|through|and|books)'
+                             u'\\s*\\.?$|[0-9]\\s*[-&./:\u2013\u2014]+\\s*$)',
+                             re.IGNORECASE)
+
+try:
+    TEXT_TYPE = unicode
+except NameError:  # pragma: no cover - python 3
+    TEXT_TYPE = str
+
+
+def unicode_text(value):
+    if isinstance(value, TEXT_TYPE):
+        return value
+    return value.decode('utf-8', 'replace')
+
+
+def match_text(value):
+    return re.sub(r'[\W_]+', '', unicode_text(value).lower(), flags=re.UNICODE)
+
+
+def fold_accents(value):
+    """
+        Strips combining marks (NFKD decomposition) so accented and
+        unaccented spellings compare equal in the book-number stem check.
+        The original title is never altered; this is a comparison key only.
+    """
+    text = unicode_text(value)
+    decomposed = unicodedata.normalize('NFKD', text)
+    stripped = [char for char in decomposed
+                if not unicodedata.combining(char)]
+    return u''.join(stripped)
+
+
+def book_number(title):
+    title = unicode_text(title)
+    match = BOOK_NUMBER.match(title)
+    if match:
+        stem = match.group(1).rstrip()
+        if not NON_BOOK_SUFFIX.search(stem) and not re.search(
+                r'[0-9][.,:]\s*[0-9]+$', title):
+            return match_text(stem), int(match.group(2))
+    return match_text(title), None
+
+
+def book_number_key(title):
+    """
+        (accent-folded stem, number) for the book-number comparison.
+        Folding is scoped to this key; the title itself is unchanged.
+    """
+    stem, number = book_number(title)
+    return fold_accents(stem), number
+
+
+def conflicts_with_book_number(query, candidate):
+    stem, number = book_number(query)
+    if not stem or number is None:
+        return False
+    # The comparison key folds accents so an accented stem (Canción) and
+    # its unaccented spelling (Cancion) match; the raw titles used for the
+    # API request and display are left untouched.
+    query_key = fold_accents(stem)
+    title_key, title_number = book_number_key(candidate['title'])
+    if title_key == query_key and title_number == number:
+        return False
+
+    # Only use positions for a series named by the input. The first sort
+    # ordinal is not enough to decide whether an omnibus includes a book.
+    has_conflict = False
+    for series in candidate.get('series') or []:
+        # Strip and fold both sides, mirroring the old match_text
+        # comparison: a prefixed series title (The Saga) is the same
+        # series as a bare stem (Saga), and accents are folded.
+        if match_text(
+                fold_accents(book_number_key(
+                    series.get('title') or '')[0])) != query_key:
+            continue
+        position = series.get('position') or {}
+        spans = position.get('spans') or []
+        for span in spans:
+            start, end = span.get('start'), span.get('end')
+            if start is not None and end is not None and start <= number <= end:
+                return False
+        if spans and position.get('status') == 'complete':
+            has_conflict = True
+    if has_conflict:
+        return True
+    if title_key == query_key:
+        return title_number is not None or number > 1
+    return False
+
+
 class ScoreTool:
     # Starting value for score before deductions are taken.
     INITIAL_SCORE = 100
     # Any score lower than this will be ignored.
     IGNORE_SCORE = 45
 
-    def __init__(
-        self,
-        helper,
-        index,
-        info,
-        locale,
-        levenshtein_distance,
-        result_dict,
-        year=None
-    ):
+    def __init__(self, helper, index, info, levenshtein_distance,
+                 result_dict):
         self.calculate_score = levenshtein_distance
         self.helper = helper
         self.index = index
         self.info = info
-        self.english_locale = locale
         self.result_dict = result_dict
-        self.year = year
-
-    def reduce_string(self, string):
-        """
-            Reduces a string to lowercase and removes
-            punctuation and spaces.
-        """
-        normalized = string \
-            .lower() \
-            .replace('-', '') \
-            .replace(' ', '') \
-            .replace('.', '') \
-            .replace(',', '')
-        return normalized
 
     def run_score_author(self):
-        """
-            Scores an author result.
-        """
         self.asin = self.result_dict['id']
         self.author = self.result_dict['name']
-        self.authors_concat = self.author
-        self.date = None
-        self.language = None
         self.narrator = None
         self.title = None
-        return self.score_result()
+        self.thumb = None
+        self.score_result(self.score_author(self.author))
 
-    def run_score_book(self):
-        """
-            Scores a book result.
-        """
+    def run_score_book(self, relaxed_author=False):
+        query = self.helper.normalizedName
+        if not self.helper.manual and conflicts_with_book_number(
+                query, self.result_dict):
+            log.info('Skipping title with conflicting book number: %s',
+                     self.result_dict['title'])
+            return
         self.asin = self.result_dict['book_id']
-        authors = self.result_dict['author']
-        self.authors_concat = ', '.join(
-            author['name'] for author in authors
-        ) if authors else ''
-        self.author = authors[0]['name'] if authors else ''
-        self.date = self.result_dict['date']
-        self.language = (self.result_dict['language'] or '').title()
+        authors = [author['name'] for author in self.result_dict['author']]
+        self.author = authors[0] if authors else ''
         narrators = self.result_dict['narrator']
         self.narrator = narrators[0]['name'] if narrators else ''
         self.title = self.result_dict['title']
-        return self.score_result()
-
-    def sum_scores(self, numberlist):
-        """
-            Sums a list of numbers.
-        """
-        # Because builtin sum() isn't available
-        return reduce(
-            lambda x, y: x + y, numberlist, 0
-        )
+        self.thumb = self.result_dict.get('thumb')
+        title_score = self.score_album(query, self.title,
+                                       self.result_dict.get('subtitle'))
+        author_score = 0
+        if self.helper.media.artist:
+            if authors:
+                # A file can credit one co-author or list the whole group.
+                author_score = min(self.score_author(author) for author in
+                                   authors + [', '.join(authors)])
+            else:
+                author_score = 20
+            if relaxed_author and self.helper.manual:
+                author_score = min(20, author_score)
+        # A catalog credit ID that matches the album's parent person is
+        # positive author evidence: no name-distance penalty. A missing or
+        # different ID is not evidence against the hit.
+        try:
+            parent_id = self.helper.parent_author_id()
+        except AttributeError:
+            parent_id = None
+        if parent_id:
+            for credit in self.result_dict['author']:
+                if credit.get('id') == parent_id:
+                    author_score = 0
+                    break
+        self.score_result(title_score + author_score)
 
     def score_create_result(self, score):
-        """
-            Creates a result dict for the score.
-            Logs the score and the data used to calculate it.
-        """
-        data_to_log = []
-        plex_score_dict = {}
-
-        # Go through all the keys for the result and log as we go
-        if self.asin:
-            plex_score_dict['id'] = self.asin
-            data_to_log.append({'ID is': self.asin})
+        result = {'id': self.asin, 'score': score}
         if self.author:
-            plex_score_dict['author'] = self.author
-            data_to_log.append({'Author is': self.author})
-        if self.date:
-            plex_score_dict['date'] = self.date
-            data_to_log.append({'Date is': self.date})
+            result['author'] = self.author
         if self.narrator:
-            plex_score_dict['narrator'] = self.narrator
-            data_to_log.append({'Narrator is': self.narrator})
-        if score:
-            plex_score_dict['score'] = score
-            data_to_log.append({'Score is': str(score)})
+            result['narrator'] = self.narrator
         if self.title:
-            plex_score_dict['title'] = self.title
-            data_to_log.append({'Title is': self.title})
-        if self.year:
-            plex_score_dict['year'] = self.year
+            result['title'] = self.title
+        if self.thumb:
+            result['thumb'] = self.thumb
+        return result
 
-        log.metadata(data_to_log, log_level="info")
-        return plex_score_dict
-
-    def score_result(self):
-        """
-            Scores a result.
-        """
-        # Array to hold score points for processing
-        all_scores = []
-
-        # Album name score
-        if self.title:
-            title_score = self.score_album(self.title)
-            if title_score:
-                all_scores.append(title_score)
-        # Author name score
-        if self.authors_concat:
-            author_score = self.score_author(self.authors_concat)
-            if author_score:
-                all_scores.append(author_score)
-        # Library language score
-        if self.language:
-            lang_score = self.score_language(self.language)
-            if lang_score:
-                all_scores.append(lang_score)
-
-        # Subtract difference from initial score
-        # Subtract index to use relevance as weight
-        score = self.INITIAL_SCORE - self.sum_scores(all_scores) - self.index
-
-        log.info("Result #" + str(self.index + 1))
-
-        # Create result dict
-        plex_score_dict = self.score_create_result(score)
-
+    def score_result(self, deduction):
+        score = self.INITIAL_SCORE - deduction - self.index
+        log.info('Result #%s (%s): score %s', self.index + 1, self.asin, score)
         if score >= self.IGNORE_SCORE:
-            self.info.append(plex_score_dict)
-        else:
-            log.info(
-                '# Score is below ignore boundary (%s)... Skipping!',
-                self.IGNORE_SCORE
-            )
+            self.info.append(self.score_create_result(score))
 
-    def score_album(self, title):
-        """
-            Compare the input album similarity to the search result album.
-            Score is calculated with LevenshteinDistance
-        """
-        scorebase1 = self.helper.media.album
-        if not scorebase1:
-            log.error('No album title found in file metadata')
+    def score_album(self, query, title, subtitle=None):
+        if not query:
             return 50
-        scorebase2 = title.encode('utf-8')
-        album_score = self.calculate_score(
-            self.reduce_string(scorebase1),
-            self.reduce_string(scorebase2)
-        ) * 2
-        log.debug("Score deduction from album: " + str(album_score))
-        return album_score
+        key = match_text(query)
+        query_number = book_number(query)
+        if query_number[1] is not None and query_number == book_number(title):
+            return 0
+        distance = self.calculate_score(key, match_text(title))
+        if subtitle:
+            distance = min(distance, self.calculate_score(
+                key, match_text(title + ' ' + subtitle)))
+        return distance * 2
 
     def score_author(self, author):
-        """
-            Compare the input author similarity to the search result author.
-            Score is calculated with LevenshteinDistance
-        """
-        if self.helper.media.artist:
-            scorebase3 = self.helper.media.artist
-            scorebase4 = author
-            author_score = self.calculate_score(
-                self.reduce_string(scorebase3),
-                self.reduce_string(scorebase4)
-            ) * 10
-            log.debug("Score deduction from author: " + str(author_score))
-            return author_score
-
-        log.warn('No artist found in file metadata')
-        return 20
-
-    def score_language(self, language):
-        """
-            Compare the library language to search results
-            and knock off 2 points if they don't match.
-        """
-        lang_dict = {
-            self.english_locale: 'English',
-            'de': 'German',
-            'es': 'Spanish',
-            'fr': 'French',
-            'it': 'Italian',
-            'ja': 'Japanese',
-        }
-
-        if language != lang_dict[self.helper.lang]:
-            log.debug(
-                'Audible language: %s; Library language: %s',
-                language,
-                lang_dict[self.helper.lang]
-            )
-            log.debug("Book is not library language, deduct 2 points")
-            return 2
-        return 0
+        artist = self.helper.media.artist
+        if not artist:
+            return 20
+        return self.calculate_score(match_text(artist), match_text(author)) * 10

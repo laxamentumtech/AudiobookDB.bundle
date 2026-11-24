@@ -18,6 +18,7 @@ import unittest  # noqa: F401  (re-exported for test modules)
 
 # Apply py2 -> py3 patches to the stdlib BEFORE bundle modules import it.
 import py23_compat  # noqa: F401  (must stay first)
+from py23_compat import HTTPError  # noqa: E402
 
 # Make ``from search_tools import ...`` etc. resolve to the bundle code.
 _CODE_DIR = os.path.join(os.path.dirname(os.path.dirname(
@@ -26,20 +27,6 @@ if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
 import search_tools as _search_tools  # noqa: E402
-
-if sys.version_info[0] >= 3:
-    # Legacy ``ScoreTool.score_album`` encodes the title to bytes (py2 str)
-    # before calling ``reduce_string``; on py3 the ``.replace('-','')`` on
-    # bytes would raise TypeError. Decode bytes back to str first, which is
-    # exactly the py2 semantics (py2 ``str`` *is* bytes).
-    _orig_reduce_string = _search_tools.ScoreTool.reduce_string
-
-    def _reduce_string(self, string):
-        if isinstance(string, bytes):
-            string = string.decode('utf-8')
-        return _orig_reduce_string(self, string)
-
-    _search_tools.ScoreTool.reduce_string = _reduce_string
 
 
 class English(object):
@@ -72,12 +59,13 @@ Agent.Album = type('Album', (AgentBase,), {})
 
 
 class MetadataSearchResult(object):
-    def __init__(self, id, lang, name, score, year=None):
+    def __init__(self, id, lang, name, score, year=None, thumb=None):
         self.id = id
         self.lang = lang
         self.name = name
         self.score = score
         self.year = year
+        self.thumb = thumb
 
 
 class _Results(object):
@@ -93,16 +81,84 @@ class _Results(object):
         self.appended = []
 
 
+class _HTTPHeaderProxy(object):
+    """Mirror of the framework's HTTPHeaderProxy: lower-cased keys,
+    indexing and iteration only, no .get()."""
+
+    def __init__(self, headers):
+        self._headers = dict((str(k).lower(), v)
+                             for k, v in (headers or {}).items())
+
+    def __getitem__(self, name):
+        return self._headers[str(name).lower()]
+
+    def __iter__(self):
+        return self._headers.__iter__()
+
+    def __repr__(self):
+        return repr(self._headers)
+
+
 class _HTTPRequest(object):
-    def __init__(self, status=200, body=None, headers=None):
-        self.status = status
-        self.body = body
-        if isinstance(self.body, bytes):
-            self.body = self.body.decode('utf-8')
-        self.headers = headers or {}
+    """Transport double.
+
+    ``lazy=False`` (default): the test-contract shape with a plain
+    ``.status`` and dict ``.headers``.
+
+    ``lazy=True``: mirrors Plex's real HTTPRequest — no ``.status``
+    attribute, ``str()`` loads the body (raising ``HTTPError`` with
+    ``.code`` for non-2xx), and the response's cookies are applied to the
+    jar at that load point. A headers-only read before the body has loaded
+    raises ``RuntimeError`` (the real transport answers it with a HEAD to
+    the endpoint); once the body is loaded, ``headers`` is the
+    ``_HTTPHeaderProxy``.
+    """
+
+    def __init__(self, status=200, body=None, headers=None, lazy=False):
+        self._status = status
+        self._headers = headers or {}
+        self._lazy = lazy
+        self._url = None
+        self._module = None
+        self._body_loaded = not lazy
+        if isinstance(body, bytes):
+            body = body.decode('utf-8')
+        self._body = body
+        self._proxy = _HTTPHeaderProxy(self._headers)
+        if not lazy:
+            self.status = status
+            self.headers = self._headers
+
+    @property
+    def headers(self):
+        if self._lazy and not self._body_loaded:
+            # A headers-only read before the body loads issues a HEAD to
+            # the endpoint; the GET-only prime endpoint cannot answer it.
+            raise RuntimeError('headers read before body load (HEAD)')
+        return self._proxy
+
+    @headers.setter
+    def headers(self, value):
+        self._headers = value
+
+    def body_loaded(self):
+        """True once the body has been read (always for eager responses)."""
+        return self._body_loaded
 
     def __str__(self):
-        return self.body or ''
+        if self._lazy:
+            if self._status is not None \
+                    and not 200 <= self._status < 300:
+                # The real transport's GET has run: the body is loaded
+                # (the coded HTTPError carries it) even though the read
+                # raises, so a headers read afterwards is legal.
+                self._body_loaded = True
+                raise HTTPError(self._url or '', self._status,
+                                'HTTP %s' % self._status, self._proxy, None)
+            self._body_loaded = True
+            if self._module is not None:
+                self._module._apply_set_cookies(self)
+        return self._body or ''
 
 
 class _HTTPModule(object):
@@ -120,17 +176,60 @@ class _HTTPModule(object):
         self.CacheTime = 0
         self._cache = {}
         self.requests = []  # (url, method, headers, data) call log
+        # Mirror of Plex's global cookie jar: Set-Cookie headers on a
+        # response land here and are presented on later requests.
+        self.cookies = {}
 
     def Request(self, url, method='GET', headers=None, data=None,
-                timeout=None, sleep=None):
+                timeout=None, sleep=None, lazy=None):
         self.requests.append((url, method, headers, data))
         cacheable = method == 'GET'
         if cacheable and url in self._cache:
             return self._cache[url]
-        resp = self.transport(url, method=method, headers=headers, data=data)
+        if lazy is not None:
+            resp = self.transport(url, method=method, headers=headers,
+                                  data=data, lazy=lazy)
+        else:
+            resp = self.transport(url, method=method, headers=headers,
+                                  data=data)
+        if not isinstance(resp, _HTTPRequest):
+            resp = _HTTPRequest(200, resp)
+        resp._url = url
+        resp._module = self
+        # The real transport applies a response's cookies while loading the
+        # body; an eager response is already loaded, a lazy one applies them
+        # on the first body read (see _HTTPRequest.__str__).
+        if resp.body_loaded():
+            self._apply_set_cookies(resp)
         if cacheable:
             self._cache[url] = resp
         return resp
+
+    def _apply_set_cookies(self, resp):
+        """Apply the response's Set-Cookie values to the jar (the real
+        transport does this while loading the body)."""
+        raw = None
+        headers = resp._headers
+        if hasattr(headers, 'get'):
+            raw = headers.get('set-cookie')
+        else:
+            for key in headers:
+                if str(key).lower() == 'set-cookie':
+                    raw = headers[key]
+                    break
+        if not raw:
+            return
+        for part in str(raw).replace(',', ';').split(';'):
+            part = part.strip()
+            if '=' in part:
+                name, value = part.split('=', 1)
+                self.cookies[name.strip()] = value.strip()
+
+    def CookiesForURL(self, url=None):
+        return [
+            {'name': name, 'value': value, 'domain': '', 'path': '/'}
+            for name, value in sorted(self.cookies.items())
+        ]
 
     def ClearCache(self):
         self._cache = {}
@@ -139,6 +238,7 @@ class _HTTPModule(object):
     def Reset(self):
         self._cache = {}
         self.requests = []
+        self.cookies = {}
 
 
 class Prefs(dict):

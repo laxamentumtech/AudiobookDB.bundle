@@ -84,6 +84,7 @@ def default_mapping():
 def install_transport(search_hits, mapping=None, thumb_body=b'JPEGDATA'):
     """Fixture-backed transport; records requests on HTTP.requests."""
     _prefs()
+    Prefs['api_key'] = 'test-key'
     mapping = dict(default_mapping()) if mapping is None else mapping
     if search_hits is not None:
         mapping[BASE + '/search'] = (200, api_body(search_hits))
@@ -109,7 +110,19 @@ class FakeMedia(object):
         self.artist = kw.get('artist')
         self.name = kw.get('name')
         self.filename = kw.get('filename')
-        self.parent_metadata = type('PM', (), {'id': 'ASIN_pm'})()
+        self.parent_metadata = type('PM', (), {'id': kw.get('parent_id', 'ASIN_pm')})()
+        self.tree = kw.get('tree')
+        self.children = kw.get('children', [])
+
+
+def plex_track(track_id, index, title, duration, path, language='eng', disc=1):
+    stream = type('Stream', (), {'type': 2, 'languageCode': language})()
+    part = type('Part', (), {'file': path, 'streams': [stream]})()
+    item = type('Item', (), {'parts': [part]})()
+    return type('Track', (), {
+        'id': track_id, 'index': str(index), 'parentIndex': str(disc),
+        'title': title, 'duration': str(duration), 'items': [item],
+    })()
 
 
 class FakePosters(dict):
@@ -182,14 +195,6 @@ class TestStartAndIdentity(unittest.TestCase):
         _prefs()
         self.assertIsNone(agent.ValidatePrefs())
 
-    def test_get_date_from_string(self):
-        tool = agent.AudiobookAlbum()
-        self.assertEqual(
-            str(tool.getDateFromString('2013-03-22T00:00:00Z')),
-            '2013-03-22')
-        self.assertIsNone(tool.getDateFromString(None))
-        self.assertIsNone(tool.getDateFromString('garbage'))
-
 
 class TestAlbumSearch(unittest.TestCase):
     """New-behavior check 1: fixture-backed album search."""
@@ -256,8 +261,14 @@ class TestAlbumSearch(unittest.TestCase):
         self.assertEqual(r.score, 99)
         # Book search hits carry no date -> year is None (r.get('year')).
         self.assertIsNone(r.year)
-        self.assertIn('The Martian', r.name)
-        self.assertIn('A.Weir', r.name)
+        # The hit has no narrator role, so automatic search must not invent
+        # one, must not leave a dangling separator, and must not fetch a
+        # book detail to look for one.
+        self.assertEqual(r.name, '"The Martian" by A.Weir')
+        self.assertNotIn('w/', r.name)
+        detail_reqs = [req for req in HTTP.requests
+                       if 'include=releases' in req[0]]
+        self.assertEqual(detail_reqs, [])
 
     def test_search_posts_search_body(self):
         install_transport(load_fixture('search_books_martian.json'))
@@ -271,7 +282,139 @@ class TestAlbumSearch(unittest.TestCase):
         body = json.loads(search_reqs[0][3])
         self.assertEqual(body['type'], 'books')
         self.assertEqual(body['q'], 'The Martian')
-        self.assertEqual(body['filters'], {'person': 'Andy Weir'})
+        self.assertEqual(body['filters'], {'person': 'Andy Weir', 'role': 'Author'})
+        self.assertIn('seriesWithId', body['includeFields'])
+        self.assertNotIn('releaseCount', body['includeFields'])
+
+    def test_title_only_retry_after_empty_author_filter(self):
+        install_transport([])
+        hits = self._two_hit_response()[:1]
+
+        def transport(url, method='GET', headers=None, data=None):
+            if url == BASE + '/search' and method == 'POST':
+                body = json.loads(data)
+                return _HTTPRequest(200, api_body([] if 'filters' in body else hits))
+            return _HTTPRequest(404, '')
+
+        HTTP.transport = transport
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(artist='Wrong Local Artist'),
+            plex_shim.Locale.Language.English, True)
+        queries = [json.loads(req[3]) for req in HTTP.requests
+                   if req[1] == 'POST']
+        self.assertEqual(len(queries), 2)
+        self.assertEqual(queries[0]['filters']['role'], 'Author')
+        self.assertNotIn('filters', queries[1])
+        self.assertEqual(results.appended[0].id, 'book.aaaaaaaaaaaa')
+
+    @staticmethod
+    def _hit_without_narrator(book_id, title):
+        return {
+            'id': book_id,
+            'title': title,
+            'people': [
+                {'role': {'name': 'Author'},
+                 'person': {'id': 'p1', 'name': 'Andy Weir'}},
+            ],
+            'originalLanguage': 'English',
+        }
+
+    @staticmethod
+    def _release_with_narrator(release_id, narrator):
+        return {
+            'id': release_id,
+            'people': [
+                {'role': {'name': 'Narrator'},
+                 'person': {'id': 'n-' + release_id, 'name': narrator}},
+            ],
+        }
+
+    def test_manual_search_reads_single_release_narrator(self):
+        # A manual title search hit has authors but no narrator credit in
+        # the search payload; the agent must read the one visible release
+        # to show the narrator, while keeping ID and score work-only.
+        book_id = 'aaaaaaaaaaaa'
+        detail_url = BASE + '/books/' + book_id + '?include=releases'
+        detail = {
+            'id': book_id,
+            'title': 'The Martian',
+            'releases': [
+                {
+                    'id': 'rel1',
+                    'people': [
+                        # A blank credit must not win: use the first
+                        # nonblank Narrator name.
+                        {'role': {'name': 'Narrator'},
+                         'person': {'id': 'n0', 'name': '   '}},
+                        {'role': {'name': 'Narrator'},
+                         'person': {'id': 'n1', 'name': ' R.C. Bray '}},
+                    ],
+                },
+            ],
+        }
+        install_transport([self._hit_without_narrator(book_id, 'The Martian')],
+                          {detail_url: (200, api_body(detail))})
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(), plex_shim.Locale.Language.English,
+            True)
+        self.assertEqual(len(results.appended), 1)
+        r = results.appended[0]
+        self.assertEqual(r.id, 'book.' + book_id)
+        self.assertEqual(r.score, 100)
+        # 'R.C. Bray' -> 'R.C.Bray' via name_to_initials.
+        self.assertEqual(r.name, '"The Martian" by A.Weir w/ R.C.Bray')
+        detail_reqs = [req for req in HTTP.requests if req[0] == detail_url]
+        self.assertEqual(len(detail_reqs), 1)
+
+    def test_manual_multiple_recordings_keep_work_choice_and_rank_editions(self):
+        book_id = 'bbbbbbbbbbbb'
+        detail_url = BASE + '/books/' + book_id + '?include=releases'
+        long = self._release_with_narrator('rel1', 'R.C. Bray')
+        long.update(duration='10:00:00', releaseDate='2013-03-22T00:00:00Z',
+                    language={'name': 'English'},
+                    images=[{'url': 'https://example.invalid/untrusted'}])
+        near = self._release_with_narrator('rel2', 'Wil Wheaton')
+        near.update(duration='09:00:00', releaseDate='2020-01-01T00:00:00Z',
+                    language={'name': 'English'},
+                    images=[{'url': 'https://cdn.audiobookdb.org/release-cover'}])
+        detail = {'id': book_id, 'releases': [long, near]}
+        install_transport([self._hit_without_narrator(book_id, 'The Martian')],
+                          {detail_url: (200, api_body(detail))})
+        track = plex_track('101', 1, 'The Martian', 32400000, '/book.m4b')
+        tree = type('Tree', (), {'tracks': {'1': track}, 'children': [track]})()
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(tree=tree), plex_shim.Locale.Language.English,
+            True)
+        work, closer, other = results.appended
+        self.assertEqual(work.id, 'book.' + book_id)
+        self.assertEqual(work.score, 100)
+        self.assertEqual(work.name, '"The Martian" by A.Weir')
+        self.assertIsNone(work.year)
+        self.assertEqual(closer.id, work.id + '.release.rel2')
+        self.assertGreater(closer.score, other.score)
+        self.assertIn('W.Wheaton', closer.name)
+        self.assertEqual(closer.year, 2020)
+        self.assertEqual(closer.thumb,
+                         'https://cdn.audiobookdb.org/release-cover/small.jpg')
+        self.assertEqual(other.id, work.id + '.release.rel1')
+        self.assertIsNone(other.thumb)
+        detail_reqs = [req for req in HTTP.requests if req[0] == detail_url]
+        self.assertEqual(len(detail_reqs), 1)
+
+    def test_authorized_search_failure_does_not_trigger_unfiltered_retry(self):
+        install_transport(None, {BASE + '/search': (401, '')})
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(), plex_shim.Locale.Language.English, True)
+        self.assertEqual(results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[1] == 'POST' and req[0] == BASE + '/search']
+        self.assertTrue(search_reqs)
+        for req in search_reqs:
+            self.assertIn('filters', json.loads(req[3]))
 
 
 class TestAlbumQuickMatch(unittest.TestCase):
@@ -443,6 +586,44 @@ class TestAlbumUpdate(unittest.TestCase):
             metadata.id, 'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
         self.assertIsNone(metadata.title)
 
+    def test_refresh_names_matching_tracks_and_preserves_custom_metadata(self):
+        cases = [
+            (True, 20000, False, 'Launch'),
+            (False, 20000, False, 'Chapter 1'),
+            (True, 30000, False, 'Chapter 1'),
+            (True, 20000, True, 'Chapter 1'),
+        ]
+        for enabled, second_duration, single_file, expected_title in cases:
+            mapping = default_mapping()
+            book = load_fixture(BOOK_DETAIL)
+            book['series'] = [{'series': {'title': 'Mars Stories'}}]
+            release = load_fixture(RELEASE_DETAIL)
+            release['chapterDetail'] = {'chapters': [
+                {'ordinal': 1, 'startOffsetMs': 0, 'lengthMs': 10000, 'title': 'Launch'},
+                {'ordinal': 2, 'startOffsetMs': 10000, 'lengthMs': 20000, 'title': 'Landing'},
+            ]}
+            mapping[BASE + '/books/WQQDcMBQ3qUT'] = (200, api_body(book))
+            mapping[BASE + '/releases/dPL9fC7YnK8X'] = (200, api_body(release))
+            install_transport(None, mapping=mapping)
+            Prefs['use_chapter_titles'] = enabled
+            Prefs['store_series_as_collection'] = enabled
+            first = plex_track('201', 1, 'Chapter 1', 10000, '/one.m4b')
+            second = plex_track('202', 1, 'Custom title', second_duration,
+                                '/one.m4b' if single_file else '/two.mp3', disc=2)
+            metadata = FakeMetadata('book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+            metadata.tracks = {'201': first, '202': second}
+            metadata.collections = {'Manual collection'}
+            agent.AudiobookAlbum().update(
+                metadata, album_media(children=[second, first]),
+                plex_shim.Locale.Language.English, True)
+            self.assertEqual(metadata.tracks['201'].title, expected_title)
+            self.assertEqual(metadata.tracks['202'].title, 'Custom title')
+            self.assertIn('Manual collection', metadata.collections)
+            self.assertEqual('Mars Stories' in metadata.collections, enabled)
+            self.assertIn('Series: Mars Stories', metadata.moods)
+        Prefs['use_chapter_titles'] = False
+        Prefs['store_series_as_collection'] = False
+
     def test_album_search_update_round_trip(self):
         # Search the book (the fixture hit carries no matched release,
         # so the ID is work-only).
@@ -462,18 +643,26 @@ class TestAlbumUpdate(unittest.TestCase):
             metadata, album_media(), plex_shim.Locale.Language.English,
             False)
         self.assertEqual(metadata.title, 'The Martian')
-        self.assertEqual(
-            metadata.id, 'book.WQQDcMBQ3qUT.release.RAffFyqchypK')
+        self.assertEqual(metadata.id, 'book.WQQDcMBQ3qUT')
         urls = [req[0] for req in HTTP.requests]
         for url in urls:
             self.assertNotIn('/audiobooks/external/', url)
             self.assertNotIn('/search', url)
+            self.assertNotIn('/releases/', url)
         self.assertIn(BASE + '/books/WQQDcMBQ3qUT', urls)
-        self.assertIn(BASE + '/releases/RAffFyqchypK', urls)
 
 
 class TestArtistSearchAndUpdate(unittest.TestCase):
     """New-behavior check 4: person migration + search round trip."""
+
+    def test_non_latin_author_name_reaches_search(self):
+        name = u'\u6751\u4e0a\u6625\u6a39'
+        install_transport([{'id': 'aaaaaaaaaaaa', 'name': name}])
+        results = _Results()
+        agent.AudiobookArtist().search(results, artist_media(artist=name),
+                                       'ja', False)
+        self.assertEqual(results.appended[0].name, name)
+        self.assertEqual(json.loads(HTTP.requests[0][3])['q'], name)
 
     def test_empty_artist_search_noop(self):
         # None and '' artist values short-circuit: the search completes

@@ -24,6 +24,18 @@
         "default": "false"
     },
     {
+        "id": "use_chapter_titles",
+        "label": "Name tracks from matching audiobook chapters",
+        "type": "bool",
+        "default": "false"
+    },
+    {
+        "id": "store_series_as_collection",
+        "label": "Add series to album collections (experimental)",
+        "type": "bool",
+        "default": "false"
+    },
+    {
         "id": "logging_level",
         "label": "Level of plugin logging: ",
         "type": "enum",

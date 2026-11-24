@@ -2,7 +2,7 @@
 
 Plex audiobook metadata agent powered by the AudiobookDB catalog, with direct ASIN and native-ID matching.
 
-[AudiobookDB Agent](https://github.com/laxamentumtech/AudiobookDB.bundle) is a [Plex](https://www.plex.tv) metadata agent for audiobook libraries that sources everything — books, releases, and people — from the [AudiobookDB](https://audiobookdb.org) public API (`https://audiobookdb.org/api`). It is the successor to the Audnexus agent and installs alongside it: it registers under its own plug-in identifier (`com.plexapp.agents.audiobookdb`), so the legacy `Audnexus.bundle` can stay installed. Each library keeps using whichever agent is selected for it until you switch it over, and old pinned Audnexus IDs migrate safely (see [Migrating from Audnexus](#migrating-from-audnexus)).
+[AudiobookDB Agent](https://github.com/laxamentumtech/AudiobookDB.bundle) is a [Plex](https://www.plex.tv) metadata agent for audiobook libraries that sources everything — books, releases, and people — from the [AudiobookDB](https://audiobookdb.org) public API (`https://api.audiobookdb.org/api`). It is the successor to the Audnexus agent and installs alongside it: it registers under its own plug-in identifier (`com.plexapp.agents.audiobookdb`), so the legacy `Audnexus.bundle` can stay installed. Each library keeps using whichever agent is selected for it until you switch it over, and old pinned Audnexus IDs migrate safely (see [Migrating from Audnexus](#migrating-from-audnexus)).
 
 What sets it apart:
 
@@ -63,7 +63,11 @@ After a restart, *AudiobookDB Agent* appears in the agent picker for audiobook l
 3. On the **Advanced** tab, choose **AudiobookDB Agent** from the **Agent** drop-down. Existing libraries keep their current agent until you switch it here.
 4. Optionally set the other preferences below, then run a refresh.
 
-A refresh populates from AudiobookDB: books appear as albums — title, sort title, summary, studio, original release date, rating, genres, moods/styles, poster, and the native ID; authors appear as artists — name, sort title, summary, genres, poster, and native ID. Narrators are stored as Style tags, not as separate profiles. Series information is stored as Mood tags, not as Plex collections.
+A refresh populates from AudiobookDB: books appear as albums — title, sort title, summary, studio, original release date, rating, genres, moods/styles, poster, and the native ID; authors appear as artists — name, sort title, summary, genres, poster, and native ID. Narrators are stored as Style tags, not as separate profiles. Series information is stored as Mood tags. An experimental preference can also contribute series names as collections.
+
+Album title searches keep punctuation and accents. Without a matched parent author ID, the agent tries the title and author name first. It retries by title alone if no filtered result is usable. A matched parent author's native person ID counts as positive evidence even if the author's name differs. The agent skips results that conflict with an explicit book number during automatic matching. Use **Fix Match** to choose a result manually or change an existing pin.
+
+A title match pins the book, not a specific recording. If the book has one visible release, **Fix Match** can show its narrator and a refresh can use its release metadata. For multiple releases, **Fix Match** retains a work-only result and offers up to five selectable recording results. Available local runtime and language guide their ordering, but the agent does not automatically select an edition. Results include cover and year information where known.
 
 ## Configuration
 
@@ -78,11 +82,17 @@ To get a personal key, sign in at [audiobookdb.org](https://audiobookdb.org), op
 | `store_author_as_mood` | `true` | Append authors as Mood tags. |
 | `sort_author_by_last_name` | `true` | Sort artist by name `[Last, First]`. |
 | `simplify_title` | `false` | Simplify book titles (remove subtitle, series part, (un)abridged, etc.). |
+| `use_chapter_titles` | `false` | Opt in to chapter titles for eligible local tracks. See the conditions below. |
+| `store_series_as_collection` | `false` | Experimentally contribute series names as collections. See the limitations below. |
 | `logging_level` | `WARN` | Level of plugin logging (`DEBUG`, `INFO`, `WARN`, `ERROR`). |
+
+`use_chapter_titles` replaces only empty titles or generic chapter, track, or part titles. It requires multiple distinct local tracks and a verified release with a complete chapter sequence and matching timings. It cannot add embedded chapters to an M4B file.
+
+`store_series_as_collection` contributes series names without removing existing tags or collections. Series Mood tags remain in place. Plex server import and filtering of these collections have not been live-verified, so this preference is experimental.
 
 ## Quick match
 
-Put an ASIN in the manual search field (or in the media filename for albums) and the agent resolves it directly to a score-100 result, skipping normal search:
+Enter an ASIN in the manual search field and the agent resolves it directly, skipping normal search. For automatic album matching, the agent also checks the scanner filename and all file parts supplied by Plex for ASINs. If those hints contain conflicting IDs, the agent does not select a recording by ASIN. Manual input overrides file hints:
 
 - `B0XXXXXXXX` — an Audible ASIN, resolved through
   `GET /audiobooks/external/audible/{ASIN}` (albums) or
@@ -91,10 +101,10 @@ Put an ASIN in the manual search field (or in the media filename for albums) and
 
 ## API details
 
-- Base URL: `https://audiobookdb.org/api` — see the [API documentation](https://audiobookdb.org/docs/api).
-- Free-text search requires a query of at least 3 characters.
-- Calls make up to 4 total attempts. `Retry-After` delays are capped at 60 seconds; the client does not guarantee honoring a longer server delay.
-- The key is sent only to the AudiobookDB API origin. The Plex preference is optional in the software, which defaults to `anonymous` when empty and does not validate credentials; full-library matching still requires your personal key as described above.
+- Base URL: `https://api.audiobookdb.org/api` — see the [API documentation](https://audiobookdb.org/docs/api).
+- Album titles shorter than 3 characters need an author credit. Without a key, the agent obtains the CSRF cookie needed for text search.
+- Calls make up to 4 total attempts. `Retry-After` delays are capped at 60 seconds; the client does not guarantee honoring a longer server delay. Anonymous text search is cheaper and bounded: one prime request, one search POST, and at most one re-prime plus one retry after a rejected token.
+- The agent sends a configured API key only to the AudiobookDB API origin. If the key field is empty, the agent makes anonymous requests. Full-library matching still requires a personal key.
 - Your Plex agent and any other AudiobookDB client using the same key share that account's allowance. Short-term request throttling and daily endpoint cost-unit budgets are separate; costs vary by endpoint, and there is no fixed books-per-day or requests-per-day equivalence. See the live [access tiers and limits](https://audiobookdb.org/docs#api-access-tiers) and [endpoint costs](https://audiobookdb.org/docs#endpoint-costs) rather than relying on static quota figures.
 - A missing/invalid/expired/suspended key, a 429 throttle, or network/server errors are not evidence that an audiobook is absent from the catalog. The agent does not provide credential validation, a daily-budget stop, or automatic pause/resume. If a refresh fails, check the key and Plex preference; for throttling or exhausted daily allowance, wait for capacity to return before using Plex's refresh control. Do not immediately restart a full-library refresh. A genuine catalog miss is distinct and may require adding the external link to AudiobookDB.
 - Image fetches are restricted to HTTPS on the catalog's image CDN (`cdn.audiobookdb.org`); other hosts and plain HTTP are refused.
@@ -137,7 +147,7 @@ There is no separate contributor guide; the essentials:
   ```
 
 - The bundle targets the Python 2.7 Plex sandbox; keep new code py2/py3-compatible.
-- CI (`.github/workflows/test.yml`) runs the suite on Python 3.9/3.11/3.12 plus the Docker py2 job on every push to `develop` and on pull requests. Release tags `v*` run both suites and package `Contents/` into `AudiobookDB.bundle.zip`.
+- CI (`.github/workflows/test.yml`) runs the suite on Python 3.10/3.11/3.12 plus the Docker py2 job on every push to `develop` and on pull requests. Release tags `v*` run both suites and package `Contents/` into `AudiobookDB.bundle.zip`.
 - See [tests/COVERAGE.md](https://github.com/laxamentumtech/AudiobookDB.bundle/blob/develop/tests/COVERAGE.md) for the module-to-test map.
 
 ## Acknowledgements
