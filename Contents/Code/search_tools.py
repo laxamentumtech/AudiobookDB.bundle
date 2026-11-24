@@ -946,6 +946,28 @@ def book_number_key(title):
     return fold_accents(stem), number
 
 
+def position_number(value):
+    """
+        Numeric value from a structured series position or legacy ordinal.
+        Returns None for non-numeric or malformed values.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        return value
+    if isinstance(value, TEXT_TYPE):
+        text = value.strip()
+        if re.match(r'^[0-9]+$', text):
+            return int(text)
+        if re.match(r'^[0-9]+\.[0-9]+$', text):
+            return float(text)
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def conflicts_with_book_number(query, candidate):
     stem, number = book_number(query)
     if not stem or number is None:
@@ -961,7 +983,10 @@ def conflicts_with_book_number(query, candidate):
     # Only use positions for a series named by the input. The first sort
     # ordinal is not enough to decide whether an omnibus includes a book.
     has_conflict = False
+    has_unknown = False
     for series in candidate.get('series') or []:
+        if not isinstance(series, dict):
+            continue
         # Strip and fold both sides, mirroring the old match_text
         # comparison: a prefixed series title (The Saga) is the same
         # series as a bare stem (Saga), and accents are folded.
@@ -969,16 +994,44 @@ def conflicts_with_book_number(query, candidate):
                 fold_accents(book_number_key(
                     series.get('title') or '')[0])) != query_key:
             continue
-        position = series.get('position') or {}
-        spans = position.get('spans') or []
-        for span in spans:
-            start, end = span.get('start'), span.get('end')
-            if start is not None and end is not None and start <= number <= end:
+        position = series.get('position')
+        if position is None or position == {}:
+            # Legacy membership: a numeric ordinal is the only position.
+            ordinal = position_number(series.get('ordinal'))
+            if ordinal is None:
+                has_unknown = True
+            elif ordinal == number:
                 return False
-        if spans and position.get('status') == 'complete':
+            else:
+                has_conflict = True
+            continue
+        if not isinstance(position, dict):
+            has_unknown = True
+            continue
+        # Spans are authoritative for point, range and set positions; a
+        # malformed or reversed span is never evidence against a hit.
+        usable_spans = []
+        for span in position.get('spans') or []:
+            if not isinstance(span, dict):
+                continue
+            start = position_number(span.get('start'))
+            end = position_number(span.get('end'))
+            if start is None or end is None or start > end:
+                continue
+            usable_spans.append((start, end))
+        for start, end in usable_spans:
+            if start <= number <= end:
+                return False
+        if usable_spans and position.get('status') == 'complete':
             has_conflict = True
+        else:
+            # Explicit absent/partial/unparsed or unusable position data
+            # is unknown, not a contradiction.
+            has_unknown = True
     if has_conflict:
         return True
+    if has_unknown:
+        return False
     if title_key == query_key:
         return title_number is not None or number > 1
     return False
