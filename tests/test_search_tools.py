@@ -17,7 +17,8 @@ import search_tools  # noqa: E402
 import __init__ as agent  # noqa: E402
 from search_tools import (  # noqa: E402
     SearchTool, AlbumSearchTool, ArtistSearchTool, ScoreTool,
-    edition_tags, image_thumb, release_publisher, release_year,
+    EDITION_TAG_LIMIT, edition_tags, image_thumb, release_publisher,
+    release_year,
     series_name_in_text, series_supports_number, series_hint_eligible,
 )
 
@@ -1057,8 +1058,9 @@ class _SandboxedText(_TEXT_BASE):
 
     Plex compiles iteration to ``_getiter_ = lambda x: x.__iter__()`` and
     Python 2 ``unicode`` has no ``__iter__``, so a comprehension or for
-    loop over text raises inside the plug-in even though a plain
-    interpreter iterates text through the sequence protocol.
+    loop over text raises inside the plug-in. Plain text hides this: an
+    interpreter iterates it through the sequence protocol. Defining
+    ``__iter__`` here reproduces the sandbox call in any interpreter.
     """
 
     def __iter__(self):
@@ -1132,6 +1134,17 @@ class TestImageAndDateHelpers(unittest.TestCase):
         self.assertIsNone(release_publisher({'publishers': [{'name': ''}]}))
         self.assertIsNone(release_publisher({'publishers': []}))
 
+    def test_release_publisher_reads_singular_shape(self):
+        # Older payloads carry one `publisher` object; both shapes are
+        # accepted, and the plural list wins when both are present.
+        self.assertEqual(release_publisher(
+            {'publisher': {'name': 'Podium Publishing'}}),
+            'Podium Publishing')
+        self.assertEqual(release_publisher({
+            'publishers': [{'creditedName': 'Plural'}],
+            'publisher': {'name': 'Singular'},
+        }), 'Plural')
+
     def test_edition_tags_stay_plain_when_distinct(self):
         self.assertEqual(edition_tags([
             {'disambiguation': 'Unabridged 2011'},
@@ -1156,10 +1169,38 @@ class TestImageAndDateHelpers(unittest.TestCase):
         ]), [u'2018', u'2025'])
 
     def test_edition_tags_missing_or_malformed_disambiguation(self):
-        self.assertEqual(edition_tags([{'id': 'a'}, {'id': 'b'}]), [1, 2])
+        self.assertEqual(edition_tags([{'id': 'a'}, {'id': 'b'}]), [u'1', u'2'])
         self.assertEqual(edition_tags([
             None, {'disambiguation': ['x']}, {'disambiguation': 2020},
-        ]), [1, 2, 3])
+        ]), [u'1', u'2', u'3'])
+
+    def test_edition_tags_compare_rendered_text(self):
+        # A positional fallback and an explicit '1' both render as [1], so
+        # they collide even though the raw values differ.
+        self.assertEqual(edition_tags([{'id': 'a'}, {'disambiguation': '1'}]),
+                         [u'1 (1)', u'1 (2)'])
+
+    def test_edition_tags_bound_long_publishers(self):
+        tags = edition_tags([
+            {'disambiguation': 'unabridged',
+             'publishers': [{'name': 'A' * 40}]},
+            {'disambiguation': 'unabridged',
+             'publishers': [{'name': 'B' * 40}]},
+        ])
+        self.assertTrue(tags[0].endswith('..'), tags[0])
+        self.assertTrue(tags[1].endswith('..'), tags[1])
+        self.assertLessEqual(len(tags[0]), EDITION_TAG_LIMIT)
+        self.assertLessEqual(len(tags[1]), EDITION_TAG_LIMIT)
+        self.assertNotEqual(tags[0], tags[1])
+
+    def test_edition_tags_number_unseparable_rows(self):
+        # Same disambiguation, publisher and year: the position is the
+        # only thing left to separate the rows.
+        release = {'disambiguation': 'unabridged',
+                   'releaseDate': '2020-01-01T00:00:00Z',
+                   'publishers': [{'name': 'Podium Publishing'}]}
+        self.assertEqual(edition_tags([dict(release), dict(release)]),
+                         [u'unabridged (1)', u'unabridged (2)'])
 
     def test_first_image_thumb_skips_unusable_images(self):
         from search_tools import first_image_thumb

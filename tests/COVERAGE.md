@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 407 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 419 tests, 0 network.
 
 The test transport double (`tests/plex_shim.py`) has two modes: an
 eager default, and a `lazy=True` mode that mirrors Plex's real
@@ -25,7 +25,7 @@ contract is what gets exercised.
 | `update_tools.py` | `test_update_tools.py` |
 | (sandbox compliance of every shipped module) | `test_sandbox_compliance.py` (8 tests: restricted names and builtins, augmented assignment rules, code-dir presence) |
 
-## `test_agent.py` (44 tests) — end-to-end agent flows
+## `test_agent.py` (45 tests) — end-to-end agent flows
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -71,7 +71,7 @@ contract is what gets exercised.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (169 tests)
+## `test_search_tools.py` (180 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -89,7 +89,7 @@ contract is what gets exercised.
 | `TestAlbumReleasesForBook` | 5 | `releases_for_book`: original dicts returned, duplicate IDs deduped, merged-book 301 to winner resolved, release for another book filtered, failure/empty → `[]` |
 | `TestRecordingHints` | 11 | `recording_hints`: track duration and language signals, partial/absent → `None`, unmapped stream code without a usable label → no hint, display label in the code field is a hint |
 | `TestFoldAccentsSandbox` | 1 | `fold_accents`/`phrase_key` index text instead of iterating it, so the Plex sandbox's `x.__iter__()` iteration cannot raise on Python 2 `unicode` |
-| `TestImageAndDateHelpers` | 11 | `image_thumb`, `release_year` (non-text date → missing), `release_publisher` (credited name, name fallback, malformed), `edition_tags` (plain distinct tags, publisher/year disambiguation for shared tags, positional fallback for malformed data), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
+| `TestImageAndDateHelpers` | 15 | `image_thumb`, `release_year` (non-text date → missing), `release_publisher` (credited name, name fallback, singular `publisher` payload, malformed), `edition_tags` (plain distinct tags, publisher/year disambiguation for shared tags, bounded publisher text, numbered fallback when nothing separates rows, rendered-text comparison, positional fallback for malformed data), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
 | `TestArtistSearchToolBody` | 2 | `build_search_body` (artist): body, too-short → `None` |
 | `TestCleanupAuthorName` | 4 | `cleanup_author_name`: role removals, diacritics |
 | `TestArtistMultiArtist` | 5 | `find_non_contributor`, `handle_multi_artist`, `get_primary_author` |

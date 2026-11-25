@@ -84,18 +84,41 @@ def release_year(release):
     return None
 
 
+# Longest rendered edition tag. narrator_label reserves the suffix
+# verbatim and shortens the title first, so an unbounded publisher would
+# crowd the book title out of the row.
+EDITION_TAG_LIMIT = 24
+
+
+def bounded_tag(value):
+    """
+        Rendered, length-bounded form of an edition-tag candidate, or
+        None when the value has no text.
+    """
+    text = unicode_text(value)
+    if text is None:
+        text = u'%s' % value
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) <= EDITION_TAG_LIMIT:
+        return text
+    return text[:EDITION_TAG_LIMIT - 2] + u'..'
+
+
 def release_publisher(release):
     """
         First usable publisher credited on a release, or None. The
         credited name wins so the display matches the release's own
-        credit line.
+        credit line. The API returns a ``publishers`` list; older payloads
+        carry one ``publisher`` object.
     """
     if not isinstance(release, dict):
         return None
     publishers = release.get('publishers')
     if not isinstance(publishers, list):
-        return None
-    for publisher in publishers:
+        publishers = []
+    for publisher in publishers + [release.get('publisher')]:
         if not isinstance(publisher, dict):
             continue
         for key in ('creditedName', 'name'):
@@ -111,31 +134,52 @@ def edition_tags(releases):
 
         The release disambiguation is the tag. A tag two visible rows
         share (for example two 'unabridged' releases) cannot tell them
-        apart, so the shared text is replaced by the release publisher,
-        or its release year when no publisher is credited.
-        """
+        apart, so each row gets its release publisher, or its release
+        year when no publisher is credited. Rows that still collide get a
+        numbered tag, so every row stays distinguishable and selectable.
+    """
     tags = []
     for index, release in enumerate(releases):
         tag = unicode_text(release.get('disambiguation')) \
             if isinstance(release, dict) else None
-        tags.append(tag or index + 1)
-    counts = {}
-    for tag in tags:
-        counts[tag] = counts.get(tag, 0) + 1
-    used = set(tags)
+        tags.append(tag or u'%d' % (index + 1))
+    # Group by the tag text that renders, in first-seen order.
+    groups = []
+    group_index = {}
     for index, tag in enumerate(tags):
-        if counts[tag] < 2:
+        if tag not in group_index:
+            group_index[tag] = len(groups)
+            groups.append([tag, []])
+        groups[group_index[tag]][1].append(index)
+    used = set(tags)
+    for tag, indices in groups:
+        if len(indices) < 2:
             continue
-        release = releases[index]
-        for detail in (release_publisher(release),
-                       release_year(release)):
-            if not detail:
-                continue
-            candidate = u'%s' % detail
-            if candidate not in used:
-                tags[index] = candidate
-                used.add(candidate)
+        replacements = []
+        for index in indices:
+            release = releases[index]
+            detail = release_publisher(release) or release_year(release)
+            candidate = bounded_tag(detail) if detail else None
+            if not candidate or candidate in used:
+                replacements = None
                 break
+            used.add(candidate)
+            replacements.append((index, candidate))
+        if replacements is not None:
+            for index, candidate in replacements:
+                tags[index] = candidate
+            continue
+        # Nothing unique separates the rows: number them.
+        base = bounded_tag(tag)
+        position = 1
+        for index in indices:
+            candidate = u'%s (%d)' % (base, position)
+            while candidate in used:
+                position += 1
+                candidate = u'%s (%d)' % (base, position)
+            used.add(candidate)
+            tags[index] = candidate
+            position += 1
     return tags
 
 

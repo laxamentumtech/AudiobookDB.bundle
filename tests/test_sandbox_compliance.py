@@ -52,8 +52,8 @@ Iteration is restricted too: the sandbox compiles ``for`` loops and
 comprehensions into ``_getiter_ = lambda x: x.__iter__()``, and Python 2
 ``unicode`` has no ``__iter__``. Text must be indexed, never iterated;
 ``TestFoldAccentsSandbox`` in ``test_search_tools`` guards the accent-folding
-path (plain Python 2 iterates text through the sequence protocol, so the
-Docker py2 run cannot reproduce this failure).
+path. That test defines ``__iter__`` on the text it passes in, so both test
+runs reproduce the plug-in failure (plain text iterates without error).
 """
 
 import ast
