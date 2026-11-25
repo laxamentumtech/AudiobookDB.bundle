@@ -476,7 +476,7 @@ class TestAlbumSearch(unittest.TestCase):
         self.assertTrue(name.endswith('+3'), name)
         self.assertLessEqual(len(name), 60)
 
-    def test_multi_release_work_row_hides_book_narrator(self):
+    def test_multi_release_rows_hide_book_narrator(self):
         book_id = 'eeeeeeeeeeee'
         detail_url = BASE + '/books/' + book_id + '?include=releases'
         detail = {
@@ -509,9 +509,12 @@ class TestAlbumSearch(unittest.TestCase):
         agent.AudiobookAlbum().search(
             results, album_media(), plex_shim.Locale.Language.English,
             True)
-        self.assertEqual(len(results.appended), 3)
-        self.assertNotIn('W.Credit', results.appended[0].name)
-        release_names = [r.name for r in results.appended[1:]]
+        self.assertEqual(len(results.appended), 2)
+        self.assertNotIn('book.' + book_id,
+                         [r.id for r in results.appended])
+        self.assertFalse(any('W.Credit' in r.name
+                             for r in results.appended))
+        release_names = [r.name for r in results.appended]
         self.assertTrue(any('R.One' in name for name in release_names))
         self.assertTrue(any('R.Two' in name for name in release_names))
 
@@ -550,7 +553,8 @@ class TestAlbumSearch(unittest.TestCase):
             results, album_media(album=title, artist='A.Author'),
             plex_shim.Locale.Language.English, True)
         by_id = dict((r.id, r) for r in results.appended)
-        self.assertIn('[all editions]', by_id['book.' + book_id].name)
+        self.assertEqual(len(results.appended), 2)
+        self.assertNotIn('book.' + book_id, by_id)
         one = by_id['book.' + book_id + '.release.rel1']
         two = by_id['book.' + book_id + '.release.rel2']
         self.assertIn('[Unabridged 2011]', one.name)
@@ -562,8 +566,7 @@ class TestAlbumSearch(unittest.TestCase):
     def test_identical_edition_tags_gain_publisher(self):
         # Two releases share the 'unabridged' tag, so their rows would
         # read identically; the publisher distinguishes them (the year is
-        # already the Plex row year). The work row says it is not a
-        # recording.
+        # already the Plex row year). Only recordings are offered.
         book_id = 'hhhhhhhhhhhh'
         detail_url = BASE + '/books/' + book_id + '?include=releases'
         title = 'Vortena'
@@ -600,10 +603,8 @@ class TestAlbumSearch(unittest.TestCase):
             results, album_media(album=title, artist='N.Iliev'),
             plex_shim.Locale.Language.English, True)
         by_id = dict((r.id, r) for r in results.appended)
-        self.assertEqual(
-            by_id['book.' + book_id].name,
-            '"Vortena" by N.Iliev [all editions]')
-        self.assertIsNone(by_id['book.' + book_id].year)
+        self.assertEqual(len(results.appended), 2)
+        self.assertNotIn('book.' + book_id, by_id)
         one = by_id['book.' + book_id + '.release.rel1']
         two = by_id['book.' + book_id + '.release.rel2']
         self.assertIn('[Spoken Realms]', one.name)
@@ -633,7 +634,7 @@ class TestAlbumSearch(unittest.TestCase):
         self.assertEqual(len(results.appended), 1)
         self.assertIn('W.Credit', results.appended[0].name)
 
-    def test_manual_multiple_recordings_keep_work_choice_and_rank_editions(self):
+    def test_manual_multiple_recordings_rank_editions(self):
         book_id = 'bbbbbbbbbbbb'
         detail_url = BASE + '/books/' + book_id + '?include=releases'
         long = self._release_with_narrator('rel1', 'R.C. Bray')
@@ -653,18 +654,16 @@ class TestAlbumSearch(unittest.TestCase):
         agent.AudiobookAlbum().search(
             results, album_media(tree=tree), plex_shim.Locale.Language.English,
             True)
-        work, closer, other = results.appended
-        self.assertEqual(work.id, 'book.' + book_id)
-        self.assertEqual(work.score, 100)
-        self.assertEqual(work.name, '"The Martian" by A.Weir [all editions]')
-        self.assertIsNone(work.year)
-        self.assertEqual(closer.id, work.id + '.release.rel2')
+        closer, other = results.appended
+        self.assertEqual(len(results.appended), 2)
+        self.assertEqual(closer.id, 'book.' + book_id + '.release.rel2')
+        self.assertEqual(closer.score, 99)
         self.assertGreater(closer.score, other.score)
         self.assertIn('W.Wheaton', closer.name)
         self.assertEqual(closer.year, 2020)
         self.assertEqual(closer.thumb,
                          'https://cdn.audiobookdb.org/release-cover/small.jpg')
-        self.assertEqual(other.id, work.id + '.release.rel1')
+        self.assertEqual(other.id, 'book.' + book_id + '.release.rel1')
         self.assertIsNone(other.thumb)
         detail_reqs = [req for req in HTTP.requests if req[0] == detail_url]
         self.assertEqual(len(detail_reqs), 1)

@@ -67,7 +67,7 @@ A refresh populates from AudiobookDB: books appear as albums — title, sort tit
 
 Album title searches keep punctuation and accents. Without a matched parent author ID, the agent tries the title and author name first. It retries by title alone if no filtered result is usable. A matched parent author's native person ID counts as positive evidence even if the author's name differs. The agent skips results that conflict with an explicit book number during automatic matching. Use **Fix Match** to choose a result manually or change an existing pin.
 
-A title match pins the book, not a specific recording. If the book has one visible release, **Fix Match** can show its narrator and a refresh can use its release metadata. For multiple releases, **Fix Match** retains a work-only result, marked `[all editions]`, and offers up to five selectable recording results. Available local runtime and language guide their ordering, but the agent does not automatically select an edition. Results include cover and year information where known; recording rows whose edition labels match gain the publisher (or release year) so two editions stay distinguishable.
+A title match pins the book, not a specific recording. If the book has one visible release, **Fix Match** can show its narrator and a refresh can use its release metadata. For multiple releases, **Fix Match** offers up to five selectable recording results and no work-only choice; a book without a visible release is the only case where the work itself is offered. Available local runtime and language guide their ordering, but the agent does not automatically select an edition. Results include cover and year information where known; recording rows whose edition labels match gain the publisher (or release year) so two editions stay distinguishable.
 
 ## Configuration
 
@@ -119,9 +119,8 @@ stops at Style tags and Fix Match display.
 
 Album updates use a release pinned in the stored ID, a release matched by an
 ASIN resolve, or the only visible release. An unpinned book with multiple
-releases stays work-only; Fix Match keeps a work-only result and offers up to
-five recording rows, ranked by local runtime and language, but does not select
-an edition automatically. Accurate matches come from an ASIN in the filename
+releases stays work-only; Fix Match offers up to five recording rows, ranked
+by local runtime and language, and does not select an edition automatically. Accurate matches come from an ASIN in the filename
 or manual search field, or from an explicit `book.<id>.release.<id>` ID.
 Narrators are taken only from the selected release, never aggregated across
 releases.
