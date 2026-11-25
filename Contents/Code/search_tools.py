@@ -142,6 +142,10 @@ def edition_tags(releases):
     for index, release in enumerate(releases):
         tag = unicode_text(release.get('disambiguation')) \
             if isinstance(release, dict) else None
+        # A long disambiguation must not push the book title out of the
+        # row, so it gets the same bound as the detail tags.
+        if tag and len(tag) > EDITION_TAG_LIMIT:
+            tag = bounded_tag(tag)
         tags.append(tag or u'%d' % (index + 1))
     # Group by the tag text that renders, in first-seen order.
     groups = []
@@ -155,28 +159,43 @@ def edition_tags(releases):
     for tag, indices in groups:
         if len(indices) < 2:
             continue
+        # The group's reservations commit to `used` only if the whole
+        # group lands; a group that falls back to numbered tags leaves no
+        # stale claim for the next group to trip over.
         replacements = []
+        taken = set()
         for index in indices:
             release = releases[index]
             detail = release_publisher(release) or release_year(release)
             candidate = bounded_tag(detail) if detail else None
-            if not candidate or candidate in used:
+            if not candidate or candidate in used or candidate in taken:
                 replacements = None
                 break
-            used.add(candidate)
+            taken.add(candidate)
             replacements.append((index, candidate))
         if replacements is not None:
+            used.update(taken)
             for index, candidate in replacements:
                 tags[index] = candidate
             continue
-        # Nothing unique separates the rows: number them.
+        # Nothing unique separates the rows: number them. The position
+        # suffix counts against the limit, so the base is bounded to fit
+        # the final text, not just the base.
         base = bounded_tag(tag)
         position = 1
         for index in indices:
-            candidate = u'%s (%d)' % (base, position)
+            suffix = u' (%d)' % position
+            if base is not None \
+                    and len(base) + len(suffix) > EDITION_TAG_LIMIT:
+                base = base[:EDITION_TAG_LIMIT - len(suffix)]
+            candidate = u'%s%s' % (base, suffix)
             while candidate in used:
                 position += 1
-                candidate = u'%s (%d)' % (base, position)
+                suffix = u' (%d)' % position
+                if base is not None \
+                        and len(base) + len(suffix) > EDITION_TAG_LIMIT:
+                    base = base[:EDITION_TAG_LIMIT - len(suffix)]
+                candidate = u'%s%s' % (base, suffix)
             used.add(candidate)
             tags[index] = candidate
             position += 1

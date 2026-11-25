@@ -1202,6 +1202,41 @@ class TestImageAndDateHelpers(unittest.TestCase):
         self.assertEqual(edition_tags([dict(release), dict(release)]),
                          [u'unabridged (1)', u'unabridged (2)'])
 
+    def test_edition_tags_failed_group_leaves_no_stale_reservation(self):
+        # Group x falls back to numbered tags: its claim on 'Alpha' must
+        # not starve group y out of the same publisher name.
+        self.assertEqual(edition_tags([
+            {'disambiguation': 'x',
+             'publishers': [{'name': 'Alpha'}]},
+            {'disambiguation': 'x'},
+            {'disambiguation': 'y',
+             'publishers': [{'name': 'Alpha'}]},
+            {'disambiguation': 'y',
+             'publishers': [{'name': 'Beta'}]},
+        ]), [u'x (1)', u'x (2)', u'Alpha', u'Beta'])
+
+    def test_edition_tags_bound_unique_long_tag(self):
+        # A tag no other row shares still gets the length bound, so it
+        # cannot push the book title out of the 60-char row.
+        tags = edition_tags([
+            {'disambiguation': 'C' * 40},
+            {'disambiguation': 'Unabridged'},
+        ])
+        self.assertEqual(tags, [u'C' * 22 + u'..', u'Unabridged'])
+        self.assertLessEqual(len(tags[0]), EDITION_TAG_LIMIT)
+
+    def test_edition_tags_numbered_text_stays_within_limit(self):
+        # The ' (N)' suffix counts against the limit: the final text of a
+        # numbered tag must stay within EDITION_TAG_LIMIT, not just the
+        # base it is built from.
+        tags = edition_tags([
+            {'disambiguation': 'C' * 40},
+            {'disambiguation': 'C' * 40},
+        ])
+        for tag in tags:
+            self.assertLessEqual(len(tag), EDITION_TAG_LIMIT, tag)
+        self.assertEqual(tags, [u'C' * 20 + u' (1)', u'C' * 20 + u' (2)'])
+
     def test_first_image_thumb_skips_unusable_images(self):
         from search_tools import first_image_thumb
         # The first image is off-CDN (unusable); the second is a trusted
