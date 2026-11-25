@@ -13,6 +13,7 @@ import plex_shim  # noqa: F401,E402  (framework fakes must load first)
 from plex_shim import Prefs, _Results, _HTTPRequest  # noqa: E402
 
 import api_client  # noqa: E402
+import search_tools  # noqa: E402
 import __init__ as agent  # noqa: E402
 from search_tools import (  # noqa: E402
     SearchTool, AlbumSearchTool, ArtistSearchTool, ScoreTool,
@@ -1043,6 +1044,48 @@ class TestRecordingHints(unittest.TestCase):
         tree = FakeTree(parts=parts)
         self.assertEqual(
             make_album(FakeMedia(tree=tree)).recording_hints()[1], 'English')
+
+
+try:
+    _TEXT_BASE = unicode
+except NameError:  # Python 3
+    _TEXT_BASE = str
+
+
+class _SandboxedText(_TEXT_BASE):
+    """Text whose ``__iter__`` fails the way Plex's sandbox does.
+
+    Plex compiles iteration to ``_getiter_ = lambda x: x.__iter__()`` and
+    Python 2 ``unicode`` has no ``__iter__``, so a comprehension or for
+    loop over text raises inside the plug-in even though a plain
+    interpreter iterates text through the sequence protocol.
+    """
+
+    def __iter__(self):
+        raise AttributeError(
+            "'unicode' object has no attribute '__iter__'")
+
+
+class TestFoldAccentsSandbox(unittest.TestCase):
+    """Accent folding must index text, never iterate it."""
+
+    def _fold_with_sandboxed_text(self, value):
+        original = search_tools.unicodedata.normalize
+
+        def normalize(form, text):
+            return _SandboxedText(original(form, text))
+
+        search_tools.unicodedata.normalize = normalize
+        try:
+            return (search_tools.fold_accents(value),
+                    search_tools.phrase_key(value))
+        finally:
+            search_tools.unicodedata.normalize = original
+
+    def test_fold_accents_does_not_iterate_text(self):
+        folded, phrase = self._fold_with_sandboxed_text(u'Canci\u00f3n')
+        self.assertEqual(folded, u'Cancion')
+        self.assertEqual(phrase, u'cancion')
 
 
 class TestImageAndDateHelpers(unittest.TestCase):

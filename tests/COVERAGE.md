@@ -88,6 +88,7 @@ contract is what gets exercised.
 | `TestPreSearchLogging` | 5 | `pre_search_logging`: missing album → track title, unknown album → `None`, manual |
 | `TestAlbumReleasesForBook` | 5 | `releases_for_book`: original dicts returned, duplicate IDs deduped, merged-book 301 to winner resolved, release for another book filtered, failure/empty → `[]` |
 | `TestRecordingHints` | 11 | `recording_hints`: track duration and language signals, partial/absent → `None`, unmapped stream code without a usable label → no hint, display label in the code field is a hint |
+| `TestFoldAccentsSandbox` | 1 | `fold_accents`/`phrase_key` index text instead of iterating it, so the Plex sandbox's `x.__iter__()` iteration cannot raise on Python 2 `unicode` |
 | `TestImageAndDateHelpers` | 11 | `image_thumb`, `release_year` (non-text date → missing), `release_publisher` (credited name, name fallback, malformed), `edition_tags` (plain distinct tags, publisher/year disambiguation for shared tags, positional fallback for malformed data), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
 | `TestArtistSearchToolBody` | 2 | `build_search_body` (artist): body, too-short → `None` |
 | `TestCleanupAuthorName` | 4 | `cleanup_author_name`: role removals, diacritics |

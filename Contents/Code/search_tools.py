@@ -1142,8 +1142,15 @@ def fold_accents(value):
     if text is None:
         return u''
     decomposed = unicodedata.normalize('NFKD', text)
-    stripped = [char for char in decomposed
-                if not unicodedata.combining(char)]
+    # Index, do not iterate: Plex compiles a for/comprehension over a value
+    # into x.__iter__(), and Python 2 unicode has no __iter__ (plain Python
+    # 2 iterates text through the sequence protocol, so tests in a plain
+    # interpreter miss it).
+    stripped = []
+    for index in range(len(decomposed)):
+        char = decomposed[index]
+        if not unicodedata.combining(char):
+            stripped.append(char)
     return u''.join(stripped)
 
 
