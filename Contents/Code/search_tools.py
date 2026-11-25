@@ -29,6 +29,30 @@ file_asin_regex = re.compile(
 
 YEAR_PREFIX = re.compile(r'\A\s*(\d{4})')
 
+# A trailing bracketed volume marker ((Vol.1), [Volume 3], {Volume 3}, ...).
+# The capture group keeps the volume text so normalize_name can unbracket
+# it (scoring evidence) while the API query drops it (the search API reads
+# "Vol. N" as a volume-pattern filter that drops books cataloged as
+# "Book N"). Only a flush-trailing marker is an edition tag; volume text
+# woven into the title (e.g. "The History (Vol. 1) of the Civil War") is
+# kept. QUERY_VOLUME also removes a bare trailing "Vol. N" left after
+# unbracketing, since the API filter fires on the text, not the brackets.
+VOLUME_TAG = r'vol(?:ume)?\.?\s*\d+'
+# group 1 = the full marker text ("Vol.1"): normalize_name's unbracket
+# keeps it as scoring evidence. group 2 = the number: the hint's
+# contradiction check needs it.
+VOLUME_MARKER = re.compile(
+    r'[\[\({]\s*(vol(?:ume)?\.?\s*(\d+))\s*[\]\)}]\s*\Z', re.IGNORECASE)
+QUERY_VOLUME = re.compile(
+    r'[\[\({]\s*' + VOLUME_TAG + r'\s*[\]\)}]\s*\Z|\s+' + VOLUME_TAG
+    + r'\s*\Z', re.IGNORECASE)
+# A bare trailing volume number ("... Vol. 1"): the query cleanup strips
+# it, so the hint's contradiction check reads it from the raw name when
+# book_number finds none (book_number deliberately ignores volume
+# suffixes).
+BARE_VOLUME_NUMBER = re.compile(
+    r'\s+' + VOLUME_TAG + r'\s*\Z', re.IGNORECASE)
+
 # Stream language codes map to the catalog's display names
 # (release language.name) so the two can be compared softly.
 STREAM_LANGUAGE_NAMES = {
@@ -613,7 +637,11 @@ class AlbumSearchTool(SearchTool):
         return None
 
     def build_search_body(self):
-        query = self.normalize_name()
+        # normalize_name keeps volume text (unbracketed) as scoring
+        # evidence; the API query drops it so the API's volume-pattern
+        # filter does not hide "Book N" catalog entries.
+        query = QUERY_VOLUME.sub(' ', self.normalize_name())
+        query = ' '.join(query.split())
         artist = (self.media.artist or '').strip()
         if not query:
             return None
@@ -755,7 +783,9 @@ class AlbumSearchTool(SearchTool):
         def strip_bracket_tag(match):
             # Keep a bracketed book number (e.g. [Book 2]) as scoring
             # evidence, unbracketed, so the trailing digit stays visible
-            # to the book-number conflict check; strip every other
+            # to the book-number conflict check; keep a bracketed volume
+            # marker the same way (mid-title volume text is title
+            # evidence, and the API query drops it); strip every other
             # bracketed tag (e.g. [2017], [Book Club],
             # [Book 2 - Unabridged] — a mixed tag is not a pure
             # book-number tag).
@@ -763,9 +793,21 @@ class AlbumSearchTool(SearchTool):
             inner = bracket.strip('[]')
             if re.match(r'\s*book\s+\d+\s*$', inner, re.IGNORECASE):
                 return ' ' + inner + ' '
+            if re.match(r'\s*' + VOLUME_TAG + r'\s*$', inner,
+                        re.IGNORECASE):
+                return ' ' + inner + ' '
             return ' '
 
-        name = re.sub(r'\[[^\]]*\]', strip_bracket_tag, input_name)
+        # A trailing bracketed volume marker is an edition tag for the
+        # API query, but the volume text is scoring evidence for local
+        # matching (a catalog title "Saga One (Vol. 2)" must stay
+        # distinct from "Saga One"), so it is unbracketed here and
+        # stripped from the query by AlbumSearchTool.query.
+        # A leading space keeps the volume text separated from the
+        # preceding title word (unspaced input like "Saga(Vol.1)") and
+        # lets the query cleanup see a removable marker.
+        name = VOLUME_MARKER.sub(r' \1', input_name)
+        name = re.sub(r'\[[^\]]*\]', strip_bracket_tag, name)
         name = re.sub(r'\(\s*(?:unabridged|abridged|audiobook)\s*\)',
                       ' ', name, flags=re.IGNORECASE)
         name = re.sub(r'\s+audiobook\s*$', '', name, flags=re.IGNORECASE)
@@ -779,8 +821,12 @@ class AlbumSearchTool(SearchTool):
         """
         search_results = []
         for item in api_response:
+            # A title must be nonempty usable text: a numeric title
+            # (e.g. 1984) or an empty string reaches rendering and breaks
+            # len()/substring work or drops the key, so it is rejected
+            # here, not downstream.
             if not isinstance(item, dict) or not item.get('id') \
-                    or not item.get('title'):
+                    or not unicode_text(item.get('title')):
                 continue
             authors = collect_role_credits(
                 item.get('people'), 'book', item['id'], 'Author')
@@ -992,15 +1038,43 @@ try:
 except NameError:  # pragma: no cover - python 3
     TEXT_TYPE = str
 
+try:
+    BYTES_TYPE = bytes
+except NameError:  # pragma: no cover - python 2
+    BYTES_TYPE = str
+
 
 def unicode_text(value):
     if isinstance(value, TEXT_TYPE):
         return value
-    return value.decode('utf-8', 'replace')
+    if isinstance(value, BYTES_TYPE):
+        return value.decode('utf-8', 'replace')
+    # Malformed catalog data (e.g. a numeric series title) must degrade
+    # to unknown, not raise.
+    return None
 
 
 def match_text(value):
-    return re.sub(r'[\W_]+', '', unicode_text(value).lower(), flags=re.UNICODE)
+    text = unicode_text(value)
+    if text is None:
+        return u''
+    return re.sub(r'[\W_]+', '', text.lower(), flags=re.UNICODE)
+
+
+def phrase_key(value):
+    """
+        Accent-folded, lower-cased phrase for whole-token containment:
+        separators (punctuation, underscores) become single spaces, so
+        'Foo-Bar', 'Foo_Bar' and 'Foo Bar' compare equal while 'Foobar'
+        does not. Unicode word semantics keep non-Latin letters (Cyrillic,
+        Japanese, ...) as letters in Python 2. None when the value is not
+        usable text.
+    """
+    text = unicode_text(value)
+    if text is None:
+        return None
+    return re.sub(r'[\W_]+', ' ', fold_accents(text).lower(),
+                  flags=re.UNICODE).strip()
 
 
 def fold_accents(value):
@@ -1010,6 +1084,8 @@ def fold_accents(value):
         The original title is never altered; this is a comparison key only.
     """
     text = unicode_text(value)
+    if text is None:
+        return u''
     decomposed = unicodedata.normalize('NFKD', text)
     stripped = [char for char in decomposed
                 if not unicodedata.combining(char)]
@@ -1018,6 +1094,8 @@ def fold_accents(value):
 
 def book_number(title):
     title = unicode_text(title)
+    if title is None:
+        return u'', None
     match = BOOK_NUMBER.match(title)
     if match:
         stem = match.group(1).rstrip()
@@ -1152,6 +1230,139 @@ def conflicts_with_book_number(query, candidate):
     return False
 
 
+# Minimum letters/digits (separators excluded) for a series title to count
+# as a Fix Match name hint; shorter names are too common to be evidence.
+SERIES_HINT_MIN_CHARS = 6
+
+
+def series_title_text(series):
+    """
+        The series title as usable text, or None for a malformed
+        membership entry.
+    """
+    if not isinstance(series, dict):
+        return None
+    return unicode_text(series.get('title'))
+
+
+def series_name_in_text(name, text):
+    """
+        True when the series title appears in ``text`` as a contiguous
+        whole-token phrase: accent-folded, case-insensitive, with
+        punctuation and underscores treated as separators. One qualifying
+        membership is all the hint needs; nothing stacks.
+    """
+    if not name or not text:
+        return False
+    name_key = phrase_key(name)
+    if not name_key:
+        return False
+    if len(re.sub(r'\s', '', name_key)) < SERIES_HINT_MIN_CHARS:
+        return False
+    text_key = phrase_key(text)
+    if not text_key:
+        return False
+    # Padding makes containment a token-boundary test, so a short series
+    # title cannot match inside a longer word.
+    return ' ' + name_key + ' ' in ' ' + text_key + ' '
+
+
+def series_supports_number(series, number):
+    """
+        Position evidence from one membership for a requested book
+        number: True when it supports, False when it contradicts, None
+        when the membership carries no usable position.
+
+        A book-number conflict withholds the name hint: a series name is
+        evidence for the series, not for a particular volume.
+    """
+    if number is None:
+        return None
+    position = series.get('position')
+    if position is None or position == {} or not isinstance(position, dict):
+        # Legacy membership: a numeric ordinal is the only position.
+        ordinal = position_number(series.get('ordinal'))
+        if ordinal is None:
+            return None
+        return ordinal == number
+    if position.get('status') != 'complete':
+        # Explicit absent/partial/unparsed position data is unknown, not
+        # support and not a contradiction.
+        return None
+    # A complete position speaks only through its usable spans, mirroring
+    # the conflict check: usable spans that miss the number contradict
+    # it; an empty or malformed span set is unknown.
+    spans = position.get('spans')
+    if not isinstance(spans, list):
+        return None
+    usable = False
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        start = position_number(span.get('start'))
+        end = position_number(span.get('end'))
+        if start is None or end is None or start > end:
+            continue
+        usable = True
+        if start <= number <= end:
+            return True
+    if usable:
+        return False
+    return None
+
+
+def requested_book_number(name):
+    """
+        The book number the local album name asks for: the number from
+        ``book_number`` (a trailing bare number or "Book N"), else the
+        number of a trailing bracketed volume marker ("(Vol.1)",
+        "[Volume 2]", "{Volume 3}"). The query cleanup drops the marker,
+        so the hint reads it from the raw name. None when the name
+        carries no usable number.
+    """
+    number = book_number(name)[1]
+    if number is not None:
+        return number
+    text = unicode_text(name)
+    if text is None:
+        return None
+    match = VOLUME_MARKER.search(text)
+    if match:
+        return position_number(match.group(2))
+    # A bare trailing volume number the query will strip.
+    match = BARE_VOLUME_NUMBER.search(text)
+    if match:
+        return position_number(re.search(r'\d+', match.group(0)).group(0))
+    return None
+
+
+def series_hint_eligible(name, candidate):
+    """
+        Fix Match hint eligibility: a qualifying series-name match in the
+        local album name that no matching membership's position
+        contradicts. Every matching membership is checked, so a
+        contradiction later in the list still withholds the hint.
+        Unknown positions never block it.
+    """
+    if not name:
+        return False
+    memberships = candidate.get('series')
+    if not isinstance(memberships, list):
+        return False
+    number = requested_book_number(name)
+    matched = False
+    for series in memberships:
+        title = series_title_text(series)
+        if title is None:
+            continue
+        if not series_name_in_text(title, name):
+            continue
+        matched = True
+        if series_supports_number(series, number) is False:
+            return False
+    return matched
+
+
 class ScoreTool:
     # Starting value for score before deductions are taken.
     INITIAL_SCORE = 100
@@ -1162,6 +1373,10 @@ class ScoreTool:
                  result_dict):
         self.calculate_score = levenshtein_distance
         self.disambiguation = None
+        # Scoring metadata recorded by run_score_book; defaults keep the
+        # artist path (run_score_author) result-free of book fields.
+        self.title_score = 0
+        self.series_eligible = False
         self.helper = helper
         self.index = index
         self.info = info
@@ -1215,10 +1430,21 @@ class ScoreTool:
                 if credit.get('id') == parent_id:
                     author_score = 0
                     break
+        # Fix Match series-name hint: eligibility is decided here (the
+        # raw effective album name is the hint surface) and the point is
+        # applied later, only where it cannot change a title ranking. The
+        # per-hit title deduction feeds the gate's tie-break.
+        self.title_score = title_score
+        self.series_eligible = False
+        if self.helper.manual:
+            self.series_eligible = series_hint_eligible(
+                self.helper.media.album, self.result_dict)
         self.score_result(title_score + author_score)
 
     def score_create_result(self, score):
-        result = {'id': self.asin, 'score': score}
+        result = {'id': self.asin, 'score': score,
+                  'title_deduction': self.title_score,
+                  'series_eligible': self.series_eligible}
         if self.author:
             author = self.author
             if self.disambiguation:
@@ -1247,8 +1473,14 @@ class ScoreTool:
             return 0
         distance = self.calculate_score(key, match_text(title))
         if subtitle:
-            distance = min(distance, self.calculate_score(
-                key, match_text(title + ' ' + subtitle)))
+            # A catalog title or subtitle may arrive as a number or list;
+            # keep the concatenation text-only, and skip a non-text
+            # subtitle rather than raise.
+            title_text = unicode_text(title)
+            subtitle_text = unicode_text(subtitle)
+            if title_text is not None and subtitle_text is not None:
+                distance = min(distance, self.calculate_score(
+                    key, match_text(title_text + ' ' + subtitle_text)))
         return distance * 2
 
     def score_author(self, author):

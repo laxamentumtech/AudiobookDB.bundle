@@ -175,6 +175,9 @@ class AudiobookArtist(Agent.Artist):
             if index <= len(result):
                 log.separator(log_level="info")
 
+        for inf in info:
+            inf.pop('title_deduction', None)
+            inf.pop('series_eligible', None)
         info = sorted(info, key=lambda inf: inf['score'], reverse=True)
         return info
 
@@ -376,7 +379,47 @@ class AudiobookAlbum(Agent.Album):
         for index, result_dict in enumerate(result):
             ScoreTool(helper, index, info, Util.LevenshteinDistance,
                       result_dict).run_score_book(relaxed_author)
+        if helper.manual:
+            self.apply_series_hint(info)
+        for inf in info:
+            inf.pop('title_deduction', None)
+            inf.pop('series_eligible', None)
         return sorted(info, key=lambda inf: inf['score'], reverse=True)
+
+    @staticmethod
+    def apply_series_hint(info):
+        """
+            Adds the one-point series-name hint to Fix Match hits.
+
+            All decisions use the unboosted base-score snapshot: a hit
+            earns the point only when it cannot change the title
+            ranking — its score is below 100, no other hit's base sits
+            at base+1, and no hit tied at the same base has a smaller
+            title deduction. One title edit costs two points, so the
+            bonus never overtakes a better title match. Every boost is
+            decided from the base scores before any is applied, so an
+            earlier boost cannot free a slot for a later hit.
+        """
+        boosts = []
+        for inf in info:
+            if not inf.get('series_eligible') \
+                    or inf['score'] >= ScoreTool.INITIAL_SCORE:
+                continue
+            blocked = False
+            for other in info:
+                if other is inf:
+                    continue
+                if other['score'] == inf['score'] + 1:
+                    blocked = True
+                    break
+                if other['score'] == inf['score'] \
+                        and other['title_deduction'] < inf['title_deduction']:
+                    blocked = True
+                    break
+            if not blocked:
+                boosts.append(inf)
+        for inf in boosts:
+            inf['score'] = inf['score'] + 1
 
     def compile_metadata(self, helper):
         """

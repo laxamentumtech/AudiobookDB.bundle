@@ -614,6 +614,124 @@ class TestAlbumSearch(unittest.TestCase):
         detail_reqs = [req for req in HTTP.requests if req[0] == detail_url]
         self.assertEqual(len(detail_reqs), 1)
 
+    def test_manual_series_hint_lifts_eligible_hit_into_a_gap(self):
+        # An eligible hit in a score gap earns +1; a hit with no series
+        # evidence stays at its base score.
+        hits = [
+            dict(self._hit_without_narrator('aaaaaaaaaaaa', 'Saga One'),
+                 seriesWithId=[{'title': 'Unrelated Series'}]),
+            dict(self._hit_without_narrator('bbbbbbbbbbbb', 'Saga One XY'),
+                 seriesWithId=[{'title': 'Unrelated Series'}]),
+        ]
+        install_transport(hits)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(album='Saga One'),
+            plex_shim.Locale.Language.English, True)
+        scores = {r.id: r.score for r in results.appended}
+        # Base scores: 100 (perfect title) and 95 (two edits, index 1).
+        self.assertEqual(scores['book.aaaaaaaaaaaa'], 100)
+        self.assertEqual(scores['book.bbbbbbbbbbbb'], 95)
+
+        # The lower hit's series name now matches the album name: the
+        # gap at 96 is empty, so the hint lifts it 95 -> 96.
+        hits[1]['seriesWithId'] = [{'title': 'Saga One'}]
+        install_transport(hits)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(album='Saga One'),
+            plex_shim.Locale.Language.English, True)
+        scores = {r.id: r.score for r in results.appended}
+        self.assertEqual(scores['book.aaaaaaaaaaaa'], 100)
+        self.assertEqual(scores['book.bbbbbbbbbbbb'], 96)
+
+    def test_manual_series_hint_never_changes_title_ranking(self):
+        # A worse-title hit at the same base score must not overtake a
+        # better-title hit, even when only the worse hit is eligible.
+        # A real base-score tie: the eligible one-edit hit at index 0
+        # (100 - 2 = 98) and the exact hit at index 2 (100 - 0 - 2 = 98)
+        # both score 98. The exact hit has the smaller title deduction,
+        # so the tie-break withholds the boost. An unconditional bonus
+        # would lift the eligible hit to 99 and let it overtake.
+        hits = [
+            dict(self._hit_without_narrator('aaaaaaaaaaaa', 'Saga One X'),
+                 seriesWithId=[{'title': 'Saga One'}]),
+            dict(self._hit_without_narrator('cccccccccccc', 'Saga One XYZ'),
+                 seriesWithId=[{'title': 'Unrelated Series'}]),
+            dict(self._hit_without_narrator('bbbbbbbbbbbb', 'Saga One'),
+                 seriesWithId=[{'title': 'Unrelated Series'}]),
+        ]
+        install_transport(hits)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(album='Saga One'),
+            plex_shim.Locale.Language.English, True)
+        scores = {r.id: r.score for r in results.appended}
+        self.assertEqual(scores['book.aaaaaaaaaaaa'], 98)
+        self.assertEqual(scores['book.bbbbbbbbbbbb'], 98)
+        # The worse-title (eligible) hit stays at or below the exact hit.
+        self.assertLessEqual(scores['book.aaaaaaaaaaaa'],
+                             scores['book.bbbbbbbbbbbb'])
+
+    def test_manual_series_hint_capped_at_100(self):
+        # A perfect-title hit below 100 only because of index/author
+        # headroom can use the hint; a base-100 hit cannot exceed 100.
+        hits = [
+            dict(self._hit_without_narrator('aaaaaaaaaaaa', 'Saga One'),
+                 seriesWithId=[{'title': 'Saga One'}]),
+        ]
+        install_transport(hits)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(album='Saga One'),
+            plex_shim.Locale.Language.English, True)
+        self.assertEqual(len(results.appended), 1)
+        # Base 100 (title 0, author 0, index 0): the cap blocks the
+        # boost, so the score stays exactly 100.
+        self.assertEqual(results.appended[0].score, 100)
+
+    def test_auto_search_ignores_series_hint(self):
+        # Automatic matching keeps byte-identical scores: no hint pass.
+        # A one-edit title scores 98 (one edit = 2 points). If the auto
+        # path wrongly ran the hint pass, the base-98 eligible hit would
+        # be boosted to 99.
+        hits = [
+            dict(self._hit_without_narrator('aaaaaaaaaaaa', 'Saga Ones'),
+                 seriesWithId=[{'title': 'Saga One'}]),
+        ]
+        install_transport(hits)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(album='Saga One'),
+            plex_shim.Locale.Language.English, False)
+        self.assertEqual(len(results.appended), 1)
+        self.assertEqual(results.appended[0].score, 98)
+
+    def test_manual_series_hint_uses_base_snapshot(self):
+        # Three-hit base staircase (S, S-1, S-2), all eligible: only the
+        # top hit may earn the point. A sequential implementation that
+        # reads already-boosted scores would let the lower hits cascade
+        # into the freed slots.
+        hits = [
+            dict(self._hit_without_narrator('aaaaaaaaaaaa', 'Saga One'),
+                 seriesWithId=[{'title': 'Saga One'}]),
+            dict(self._hit_without_narrator('bbbbbbbbbbbb', 'Saga One'),
+                 seriesWithId=[{'title': 'Saga One'}]),
+            dict(self._hit_without_narrator('cccccccccccc', 'Saga One'),
+                 seriesWithId=[{'title': 'Saga One'}]),
+        ]
+        install_transport(hits)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(album='Saga One', artist='Andy Wair'),
+            plex_shim.Locale.Language.English, True)
+        scores = {r.id: r.score for r in results.appended}
+        # One-letter artist misspelling costs 10; bases are 90, 89, 88.
+        # The top hits 90 -> 91; the others stay (occupied base above).
+        self.assertEqual(scores['book.aaaaaaaaaaaa'], 91)
+        self.assertEqual(scores['book.bbbbbbbbbbbb'], 89)
+        self.assertEqual(scores['book.cccccccccccc'], 88)
+
     def test_authorized_search_failure_does_not_trigger_unfiltered_retry(self):
         install_transport(None, {BASE + '/search': (401, '')})
         results = _Results()
