@@ -13,10 +13,12 @@ import plex_shim  # noqa: F401,E402  (framework fakes must load first)
 from plex_shim import Prefs, _Results, _HTTPRequest  # noqa: E402
 
 import api_client  # noqa: E402
+import search_tools  # noqa: E402
 import __init__ as agent  # noqa: E402
 from search_tools import (  # noqa: E402
     SearchTool, AlbumSearchTool, ArtistSearchTool, ScoreTool,
-    image_thumb, release_year,
+    EDITION_TAG_LIMIT, edition_tags, image_thumb, release_publisher,
+    release_year,
     series_name_in_text, series_supports_number, series_hint_eligible,
 )
 
@@ -1045,6 +1047,49 @@ class TestRecordingHints(unittest.TestCase):
             make_album(FakeMedia(tree=tree)).recording_hints()[1], 'English')
 
 
+try:
+    _TEXT_BASE = unicode
+except NameError:  # Python 3
+    _TEXT_BASE = str
+
+
+class _SandboxedText(_TEXT_BASE):
+    """Text whose ``__iter__`` fails the way Plex's sandbox does.
+
+    Plex compiles iteration to ``_getiter_ = lambda x: x.__iter__()`` and
+    Python 2 ``unicode`` has no ``__iter__``, so a comprehension or for
+    loop over text raises inside the plug-in. Plain text hides this: an
+    interpreter iterates it through the sequence protocol. Defining
+    ``__iter__`` here reproduces the sandbox call in any interpreter.
+    """
+
+    def __iter__(self):
+        raise AttributeError(
+            "'unicode' object has no attribute '__iter__'")
+
+
+class TestFoldAccentsSandbox(unittest.TestCase):
+    """Accent folding must index text, never iterate it."""
+
+    def _fold_with_sandboxed_text(self, value):
+        original = search_tools.unicodedata.normalize
+
+        def normalize(form, text):
+            return _SandboxedText(original(form, text))
+
+        search_tools.unicodedata.normalize = normalize
+        try:
+            return (search_tools.fold_accents(value),
+                    search_tools.phrase_key(value))
+        finally:
+            search_tools.unicodedata.normalize = original
+
+    def test_fold_accents_does_not_iterate_text(self):
+        folded, phrase = self._fold_with_sandboxed_text(u'Canci\u00f3n')
+        self.assertEqual(folded, u'Cancion')
+        self.assertEqual(phrase, u'cancion')
+
+
 class TestImageAndDateHelpers(unittest.TestCase):
     def test_image_thumb_uses_small_derivative(self):
         self.assertEqual(
@@ -1071,6 +1116,126 @@ class TestImageAndDateHelpers(unittest.TestCase):
         # prefix to match; it is treated as missing, not a TypeError.
         self.assertIsNone(release_year({'releaseDate': 2020}))
         self.assertIsNone(release_year({'releaseDate': None}))
+
+    def test_release_publisher_prefers_credited_name(self):
+        self.assertEqual(release_publisher({'publishers': [
+            'junk',
+            {'name': 'Soundbooth Theater',
+             'creditedName': 'Soundbooth Theater LLC'},
+        ]}), 'Soundbooth Theater LLC')
+        # A blank credited name falls back to the publisher name.
+        self.assertEqual(release_publisher({'publishers': [
+            {'name': 'Spoken Realms', 'creditedName': '   '},
+        ]}), 'Spoken Realms')
+
+    def test_release_publisher_missing(self):
+        self.assertIsNone(release_publisher(None))
+        self.assertIsNone(release_publisher({'publishers': 'x'}))
+        self.assertIsNone(release_publisher({'publishers': [{'name': ''}]}))
+        self.assertIsNone(release_publisher({'publishers': []}))
+
+    def test_release_publisher_reads_singular_shape(self):
+        # Older payloads carry one `publisher` object; both shapes are
+        # accepted, and the plural list wins when both are present.
+        self.assertEqual(release_publisher(
+            {'publisher': {'name': 'Podium Publishing'}}),
+            'Podium Publishing')
+        self.assertEqual(release_publisher({
+            'publishers': [{'creditedName': 'Plural'}],
+            'publisher': {'name': 'Singular'},
+        }), 'Plural')
+
+    def test_edition_tags_stay_plain_when_distinct(self):
+        self.assertEqual(edition_tags([
+            {'disambiguation': 'Unabridged 2011'},
+            {'disambiguation': 'Unabridged 2018'},
+        ]), ['Unabridged 2011', 'Unabridged 2018'])
+
+    def test_edition_tags_distinguish_identical_tags(self):
+        # The shared disambiguation cannot separate the rows; the
+        # publisher replaces it instead of repeating it twice.
+        self.assertEqual(edition_tags([
+            {'disambiguation': 'unabridged',
+             'publishers': [{'creditedName': 'Spoken Realms'}]},
+            {'disambiguation': 'unabridged',
+             'publishers': [{'name': 'Soundbooth Theater'}]},
+        ]), [u'Spoken Realms', u'Soundbooth Theater'])
+
+    def test_edition_tags_fall_back_to_release_year(self):
+        # No publisher credited: the year still separates the rows.
+        self.assertEqual(edition_tags([
+            {'disambiguation': 'unabridged', 'releaseDate': '2018-01-01'},
+            {'disambiguation': 'unabridged', 'releaseDate': '2025-01-01'},
+        ]), [u'2018', u'2025'])
+
+    def test_edition_tags_missing_or_malformed_disambiguation(self):
+        self.assertEqual(edition_tags([{'id': 'a'}, {'id': 'b'}]), [u'1', u'2'])
+        self.assertEqual(edition_tags([
+            None, {'disambiguation': ['x']}, {'disambiguation': 2020},
+        ]), [u'1', u'2', u'3'])
+
+    def test_edition_tags_compare_rendered_text(self):
+        # A positional fallback and an explicit '1' both render as [1], so
+        # they collide even though the raw values differ.
+        self.assertEqual(edition_tags([{'id': 'a'}, {'disambiguation': '1'}]),
+                         [u'1 (1)', u'1 (2)'])
+
+    def test_edition_tags_bound_long_publishers(self):
+        tags = edition_tags([
+            {'disambiguation': 'unabridged',
+             'publishers': [{'name': 'A' * 40}]},
+            {'disambiguation': 'unabridged',
+             'publishers': [{'name': 'B' * 40}]},
+        ])
+        self.assertTrue(tags[0].endswith('..'), tags[0])
+        self.assertTrue(tags[1].endswith('..'), tags[1])
+        self.assertLessEqual(len(tags[0]), EDITION_TAG_LIMIT)
+        self.assertLessEqual(len(tags[1]), EDITION_TAG_LIMIT)
+        self.assertNotEqual(tags[0], tags[1])
+
+    def test_edition_tags_number_unseparable_rows(self):
+        # Same disambiguation, publisher and year: the position is the
+        # only thing left to separate the rows.
+        release = {'disambiguation': 'unabridged',
+                   'releaseDate': '2020-01-01T00:00:00Z',
+                   'publishers': [{'name': 'Podium Publishing'}]}
+        self.assertEqual(edition_tags([dict(release), dict(release)]),
+                         [u'unabridged (1)', u'unabridged (2)'])
+
+    def test_edition_tags_failed_group_leaves_no_stale_reservation(self):
+        # Group x falls back to numbered tags: its claim on 'Alpha' must
+        # not starve group y out of the same publisher name.
+        self.assertEqual(edition_tags([
+            {'disambiguation': 'x',
+             'publishers': [{'name': 'Alpha'}]},
+            {'disambiguation': 'x'},
+            {'disambiguation': 'y',
+             'publishers': [{'name': 'Alpha'}]},
+            {'disambiguation': 'y',
+             'publishers': [{'name': 'Beta'}]},
+        ]), [u'x (1)', u'x (2)', u'Alpha', u'Beta'])
+
+    def test_edition_tags_bound_unique_long_tag(self):
+        # A tag no other row shares still gets the length bound, so it
+        # cannot push the book title out of the 60-char row.
+        tags = edition_tags([
+            {'disambiguation': 'C' * 40},
+            {'disambiguation': 'Unabridged'},
+        ])
+        self.assertEqual(tags, [u'C' * 22 + u'..', u'Unabridged'])
+        self.assertLessEqual(len(tags[0]), EDITION_TAG_LIMIT)
+
+    def test_edition_tags_numbered_text_stays_within_limit(self):
+        # The ' (N)' suffix counts against the limit: the final text of a
+        # numbered tag must stay within EDITION_TAG_LIMIT, not just the
+        # base it is built from.
+        tags = edition_tags([
+            {'disambiguation': 'C' * 40},
+            {'disambiguation': 'C' * 40},
+        ])
+        for tag in tags:
+            self.assertLessEqual(len(tag), EDITION_TAG_LIMIT, tag)
+        self.assertEqual(tags, [u'C' * 20 + u' (1)', u'C' * 20 + u' (2)'])
 
     def test_first_image_thumb_skips_unusable_images(self):
         from search_tools import first_image_thumb

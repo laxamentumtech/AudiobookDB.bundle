@@ -47,6 +47,13 @@ The sanctioned feature-detection idiom (a ``try`` whose handler catches
 ``try: BYTES_TYPE = bytes / except NameError: BYTES_TYPE = str`` is allowed.
 Names shadowed by a local binding (e.g. the ``input`` parameter of
 ``SearchTool.search_asin``) are not references to the builtin and are skipped.
+
+Iteration is restricted too: the sandbox compiles ``for`` loops and
+comprehensions into ``_getiter_ = lambda x: x.__iter__()``, and Python 2
+``unicode`` has no ``__iter__``. Text must be indexed, never iterated;
+``TestFoldAccentsSandbox`` in ``test_search_tools`` guards the accent-folding
+path. That test defines ``__iter__`` on the text it passes in, so both test
+runs reproduce the plug-in failure (plain text iterates without error).
 """
 
 import ast

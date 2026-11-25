@@ -84,6 +84,124 @@ def release_year(release):
     return None
 
 
+# Longest rendered edition tag. narrator_label reserves the suffix
+# verbatim and shortens the title first, so an unbounded publisher would
+# crowd the book title out of the row.
+EDITION_TAG_LIMIT = 24
+
+
+def bounded_tag(value):
+    """
+        Rendered, length-bounded form of an edition-tag candidate, or
+        None when the value has no text.
+    """
+    text = unicode_text(value)
+    if text is None:
+        text = u'%s' % value
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) <= EDITION_TAG_LIMIT:
+        return text
+    return text[:EDITION_TAG_LIMIT - 2] + u'..'
+
+
+def release_publisher(release):
+    """
+        First usable publisher credited on a release, or None. The
+        credited name wins so the display matches the release's own
+        credit line. The API returns a ``publishers`` list; older payloads
+        carry one ``publisher`` object.
+    """
+    if not isinstance(release, dict):
+        return None
+    publishers = release.get('publishers')
+    if not isinstance(publishers, list):
+        publishers = []
+    for publisher in publishers + [release.get('publisher')]:
+        if not isinstance(publisher, dict):
+            continue
+        for key in ('creditedName', 'name'):
+            name = unicode_text(publisher.get(key))
+            if name and name.strip():
+                return name.strip()
+    return None
+
+
+def edition_tags(releases):
+    """
+        Fix Match edition tags for the visible recording rows.
+
+        The release disambiguation is the tag. A tag two visible rows
+        share (for example two 'unabridged' releases) cannot tell them
+        apart, so each row gets its release publisher, or its release
+        year when no publisher is credited. Rows that still collide get a
+        numbered tag, so every row stays distinguishable and selectable.
+    """
+    tags = []
+    for index, release in enumerate(releases):
+        tag = unicode_text(release.get('disambiguation')) \
+            if isinstance(release, dict) else None
+        # A long disambiguation must not push the book title out of the
+        # row, so it gets the same bound as the detail tags.
+        if tag and len(tag) > EDITION_TAG_LIMIT:
+            tag = bounded_tag(tag)
+        tags.append(tag or u'%d' % (index + 1))
+    # Group by the tag text that renders, in first-seen order.
+    groups = []
+    group_index = {}
+    for index, tag in enumerate(tags):
+        if tag not in group_index:
+            group_index[tag] = len(groups)
+            groups.append([tag, []])
+        groups[group_index[tag]][1].append(index)
+    used = set(tags)
+    for tag, indices in groups:
+        if len(indices) < 2:
+            continue
+        # The group's reservations commit to `used` only if the whole
+        # group lands; a group that falls back to numbered tags leaves no
+        # stale claim for the next group to trip over.
+        replacements = []
+        taken = set()
+        for index in indices:
+            release = releases[index]
+            detail = release_publisher(release) or release_year(release)
+            candidate = bounded_tag(detail) if detail else None
+            if not candidate or candidate in used or candidate in taken:
+                replacements = None
+                break
+            taken.add(candidate)
+            replacements.append((index, candidate))
+        if replacements is not None:
+            used.update(taken)
+            for index, candidate in replacements:
+                tags[index] = candidate
+            continue
+        # Nothing unique separates the rows: number them. The position
+        # suffix counts against the limit, so the base is bounded to fit
+        # the final text, not just the base.
+        base = bounded_tag(tag)
+        position = 1
+        for index in indices:
+            suffix = u' (%d)' % position
+            if base is not None \
+                    and len(base) + len(suffix) > EDITION_TAG_LIMIT:
+                base = base[:EDITION_TAG_LIMIT - len(suffix)]
+            candidate = u'%s%s' % (base, suffix)
+            while candidate in used:
+                position += 1
+                suffix = u' (%d)' % position
+                if base is not None \
+                        and len(base) + len(suffix) > EDITION_TAG_LIMIT:
+                    base = base[:EDITION_TAG_LIMIT - len(suffix)]
+                candidate = u'%s%s' % (base, suffix)
+            used.add(candidate)
+            tags[index] = candidate
+            position += 1
+    return tags
+
+
 def image_thumb(image):
     """
         Small derivative URL for a catalog image, or None.
@@ -1087,8 +1205,15 @@ def fold_accents(value):
     if text is None:
         return u''
     decomposed = unicodedata.normalize('NFKD', text)
-    stripped = [char for char in decomposed
-                if not unicodedata.combining(char)]
+    # Index, do not iterate: Plex compiles a for/comprehension over a value
+    # into x.__iter__(), and Python 2 unicode has no __iter__ (plain Python
+    # 2 iterates text through the sequence protocol, so tests in a plain
+    # interpreter miss it).
+    stripped = []
+    for index in range(len(decomposed)):
+        char = decomposed[index]
+        if not unicodedata.combining(char):
+            stripped.append(char)
     return u''.join(stripped)
 
 

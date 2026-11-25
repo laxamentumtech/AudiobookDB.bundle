@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 407 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 419 tests, 0 network.
 
 The test transport double (`tests/plex_shim.py`) has two modes: an
 eager default, and a `lazy=True` mode that mirrors Plex's real
@@ -25,12 +25,12 @@ contract is what gets exercised.
 | `update_tools.py` | `test_update_tools.py` |
 | (sandbox compliance of every shipped module) | `test_sandbox_compliance.py` (8 tests: restricted names and builtins, augmented assignment rules, code-dir presence) |
 
-## `test_agent.py` (44 tests) — end-to-end agent flows
+## `test_agent.py` (45 tests) — end-to-end agent flows
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestStartAndIdentity` | 4 | `Start`, `ValidatePrefs`, `getDateFromString`, agent name/prefix constants |
-| `TestAlbumSearch` | 20 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all), manual edition rows (work-only + up to 5 ranked recordings with release cover/year), complete narrator lists on search hits and release rows, explicit count within the 60-character budget, work-only rows narrator-free beside editions while plain hits keep book-level narrators, edition discriminators preserved in identical recording rows, Fix Match series-name hint (lift into a gap, title-rank preserved on a real base tie, 100 cap, base-snapshot staircase, auto untouched) |
+| `TestAlbumSearch` | 21 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all), manual edition rows (recordings only when the book has releases, the work row only when it has none, up to 5 ranked recordings with release cover/year), complete narrator lists on search hits and release rows, explicit count within the 60-character budget, release rows show their own narrator while plain hits keep book-level narrators, edition discriminators preserved in identical recording rows, shared edition tags gaining publisher or release year, Fix Match series-name hint (lift into a gap, title-rank preserved on a real base tie, 100 cap, base-snapshot staircase, auto untouched) |
 | `TestAlbumQuickMatch` | 3 | `search` ASIN quick-match: album/filename ASIN → single 100-point result; unresolvable ASIN falls through |
 | `TestAlbumUpdate` | 9 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only), forced update with empty/null description keeps the existing summary and still writes title/studio/styles/native ID |
 | `TestArtistSearchAndUpdate` | 8 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID; same-name people stay distinct and show their disambiguation |
@@ -71,7 +71,7 @@ contract is what gets exercised.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (169 tests)
+## `test_search_tools.py` (180 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
@@ -88,7 +88,8 @@ contract is what gets exercised.
 | `TestPreSearchLogging` | 5 | `pre_search_logging`: missing album → track title, unknown album → `None`, manual |
 | `TestAlbumReleasesForBook` | 5 | `releases_for_book`: original dicts returned, duplicate IDs deduped, merged-book 301 to winner resolved, release for another book filtered, failure/empty → `[]` |
 | `TestRecordingHints` | 11 | `recording_hints`: track duration and language signals, partial/absent → `None`, unmapped stream code without a usable label → no hint, display label in the code field is a hint |
-| `TestImageAndDateHelpers` | 5 | `image_thumb`, `release_year` (non-text date → missing), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
+| `TestFoldAccentsSandbox` | 1 | `fold_accents`/`phrase_key` index text instead of iterating it, so the Plex sandbox's `x.__iter__()` iteration cannot raise on Python 2 `unicode` |
+| `TestImageAndDateHelpers` | 15 | `image_thumb`, `release_year` (non-text date → missing), `release_publisher` (credited name, name fallback, singular `publisher` payload, malformed), `edition_tags` (plain distinct tags, publisher/year disambiguation for shared tags, bounded publisher text, numbered fallback when nothing separates rows, rendered-text comparison, positional fallback for malformed data), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
 | `TestArtistSearchToolBody` | 2 | `build_search_body` (artist): body, too-short → `None` |
 | `TestCleanupAuthorName` | 4 | `cleanup_author_name`: role removals, diacritics |
 | `TestArtistMultiArtist` | 5 | `find_non_contributor`, `handle_multi_artist`, `get_primary_author` |

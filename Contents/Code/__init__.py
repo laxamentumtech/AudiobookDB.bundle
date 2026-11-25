@@ -5,7 +5,8 @@ from _version import version
 from logging import Logging
 import api_client
 from search_tools import (AlbumSearchTool, ArtistSearchTool, ScoreTool,
-                          image_thumb, release_narrators, release_year)
+                          edition_tags, image_thumb, release_narrators,
+                          release_year)
 import metadata_ids
 from update_tools import AlbumUpdateTool, ArtistUpdateTool
 
@@ -270,25 +271,28 @@ class AudiobookAlbum(Agent.Album):
             releases = search_helper.releases_for_book(book_id) if manual else []
             if len(releases) == 1:
                 self.append_album_match(search_helper, match, label, releases[0])
+            elif releases:
+                # Recordings only: a work-only pin carries no release data,
+                # so Fix Match must not offer it beside selectable editions.
+                ranked = sorted(releases, key=lambda release:
+                                self.recording_rank(release, hints))
+                # Bound edition rows per hit. Rows whose edition tags would
+                # otherwise read identically carry the release publisher
+                # (or year).
+                shown = ranked[:5]
+                tags = edition_tags(shown)
+                for index, release in enumerate(shown):
+                    recording = dict(match)
+                    recording['id'] = metadata_ids.serialize_book_id(
+                        book_id, release['id'])
+                    recording['score'] = match['score'] - (index + 1)
+                    self.append_album_match(search_helper, recording,
+                                            label, release,
+                                            ' [%s]' % tags[index])
             else:
-                # A work-only choice sitting next to specific recordings
-                # must not imply release-credit completeness. Plain search
-                # hits keep their explicit book-level narrator display.
-                self.append_album_match(search_helper, match, label,
-                                        include_book_narrators=not releases)
-                if releases:
-                    ranked = sorted(releases, key=lambda release:
-                                    self.recording_rank(release, hints))
-                    # Keep a work-only choice and bound edition rows per hit.
-                    for index, release in enumerate(ranked[:5]):
-                        recording = dict(match)
-                        recording['id'] = metadata_ids.serialize_book_id(
-                            book_id, release['id'])
-                        recording['score'] = match['score'] - (index + 1)
-                        edition = ' [%s]' % (
-                            release.get('disambiguation') or index + 1)
-                        self.append_album_match(search_helper, recording,
-                                                label, release, edition)
+                # No visible release: the work itself is the only match.
+                # Plain search hits keep their book-level narrator display.
+                self.append_album_match(search_helper, match, label)
 
             if not manual and match['score'] >= GOOD_SCORE:
                 break
