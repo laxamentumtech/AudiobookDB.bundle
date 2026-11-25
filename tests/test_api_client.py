@@ -266,18 +266,52 @@ class TestResolveAsinBook(unittest.TestCase):
             BASE + '/audiobooks/external/audible/B00B5HZGUG':
                 (200, api_body(book)),
         })
-        resolved, matched = api_client.resolve_asin_book('B00B5HZGUG')
+        resolved, matched, status = api_client.resolve_asin_book(
+            'B00B5HZGUG')
         self.assertEqual(resolved['id'], 'WQQDcMBQ3qUT')
         self.assertEqual(matched, 'dPL9fC7YnK8X')
+        self.assertEqual(status, api_client.LOOKUP_OK)
 
-    def test_404(self):
+    def test_404_is_a_confirmed_miss(self):
         err = load_fixture('error_404.json')
         install_transport({
             BASE + '/audiobooks/external/audible/BBBBBBBBBB':
                 (404, api_body(err)),
         })
-        self.assertEqual(api_client.resolve_asin_book('BBBBBBBBBB'),
-                         (None, None))
+        self.assertEqual(
+            api_client.resolve_asin_book('BBBBBBBBBB'),
+            (None, None, api_client.LOOKUP_MISSING))
+        # A confirmed miss is terminal: no retry budget is spent.
+        self.assertEqual(len(HTTP.requests), 1)
+
+    def test_401_is_unavailable_and_terminal(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/BBBBBBBBBB':
+                (401, ''),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_book('BBBBBBBBBB'),
+            (None, None, api_client.LOOKUP_UNAVAILABLE))
+        self.assertEqual(len(HTTP.requests), 1)
+
+    def test_500_is_unavailable_after_retries(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/BBBBBBBBBB':
+                (500, ''),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_book('BBBBBBBBBB'),
+            (None, None, api_client.LOOKUP_UNAVAILABLE))
+        self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
+
+    def test_malformed_200_is_unavailable(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/BBBBBBBBBB':
+                (200, '{"errors": [{"status": "500"}]}'),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_book('BBBBBBBBBB'),
+            (None, None, api_client.LOOKUP_UNAVAILABLE))
 
 
 class TestResolveAsinPerson(unittest.TestCase):
@@ -287,13 +321,35 @@ class TestResolveAsinPerson(unittest.TestCase):
             BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
                 (200, api_body(hits)),
         })
-        out = api_client.resolve_asin_person('B00G0WYW92')
+        out, status = api_client.resolve_asin_person('B00G0WYW92')
+        self.assertEqual(status, api_client.LOOKUP_OK)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]['id'], 'ypMPwXzWXaiX')
 
-    def test_failure_empty(self):
+    def test_confirmed_empty_is_missing(self):
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (200, '[]'),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_person('B00G0WYW92'),
+            ([], api_client.LOOKUP_MISSING))
+
+    def test_404_is_missing(self):
         install_transport({})
-        self.assertEqual(api_client.resolve_asin_person('B00G0WYW92'), [])
+        self.assertEqual(
+            api_client.resolve_asin_person('B00G0WYW92'),
+            ([], api_client.LOOKUP_MISSING))
+
+    def test_500_is_unavailable_after_retries(self):
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (500, ''),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_person('B00G0WYW92'),
+            ([], api_client.LOOKUP_UNAVAILABLE))
+        self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
 
 
 class TestDetailAndGetters(unittest.TestCase):

@@ -127,7 +127,7 @@ releases.
 
 ## Quick match
 
-Enter an ASIN in the manual search field and the agent resolves it directly, skipping normal search. For automatic album matching, the agent also checks the scanner filename and all file parts supplied by Plex for ASINs. If those hints contain conflicting IDs, the agent does not select a recording by ASIN. Manual input overrides file hints:
+Enter an ASIN in the manual search field and the agent resolves it directly, skipping normal search. For automatic matching, the agent first reads the item's current Plex GUID. If the item still carries the previous Audnexus match, the agent resolves that stored ASIN before any filename or title search. It also checks the scanner filename and all file parts supplied by Plex for ASINs. A stored GUID that conflicts with a distinct file ASIN is left for Fix Match. A confirmed 404 falls through to the next source; an unavailable lookup stops the automatic path for that item. Manual input overrides both automatic sources:
 
 - `B0XXXXXXXX` — an Audible ASIN, resolved through
   `GET /audiobooks/external/audible/{ASIN}` (albums) or
@@ -138,7 +138,7 @@ Enter an ASIN in the manual search field and the agent resolves it directly, ski
 
 - Base URL: `https://api.audiobookdb.org/api` — see the [API documentation](https://audiobookdb.org/docs/api).
 - Album titles shorter than 3 characters need an author credit. Without a key, the agent obtains the CSRF cookie needed for text search.
-- Calls make up to 4 total attempts. `Retry-After` delays are capped at 60 seconds; the client does not guarantee honoring a longer server delay. Anonymous text search is cheaper and bounded: one prime request, one search POST, and at most one re-prime plus one retry after a rejected token.
+- Calls make up to 4 total attempts. ASIN lookups treat 400/401/403/404 as terminal, so a confirmed miss does not spend the retry budget. `Retry-After` delays are capped at 60 seconds; the client does not guarantee honoring a longer server delay. Anonymous text search is cheaper and bounded: one prime request, one search POST, and at most one re-prime plus one retry after a rejected token.
 - The agent sends a configured API key only to the AudiobookDB API origin. If the key field is empty, the agent makes anonymous requests. Full-library matching still requires a personal key.
 - Your Plex agent and any other AudiobookDB client using the same key share that account's allowance. Short-term request throttling and daily endpoint cost-unit budgets are separate; costs vary by endpoint, and there is no fixed books-per-day or requests-per-day equivalence. See the live [access tiers and limits](https://audiobookdb.org/docs#api-access-tiers) and [endpoint costs](https://audiobookdb.org/docs#endpoint-costs) rather than relying on static quota figures.
 - A missing/invalid/expired/suspended key, a 429 throttle, or network/server errors are not evidence that an audiobook is absent from the catalog. The agent does not provide credential validation, a daily-budget stop, or automatic pause/resume. If a refresh fails, check the key and Plex preference; for throttling or exhausted daily allowance, wait for capacity to return before using Plex's refresh control. Do not immediately restart a full-library refresh. A genuine catalog miss is distinct and may require adding the external link to AudiobookDB.
@@ -148,12 +148,13 @@ Enter an ASIN in the manual search field and the agent resolves it directly, ski
 
 `AudiobookDB.bundle` declares its own plug-in identifier (`com.plexapp.agents.audiobookdb`), so it coexists with the legacy `Audnexus.bundle` — nothing needs to be removed.
 
-Once a library is switched to this agent, its old pinned IDs (`ASIN` / `ASIN_region`) keep working: on the next refresh the agent resolves the ASIN against AudiobookDB, populates metadata, and rewrites the pinned ID to the new native form (`book.<id>.release.<id>` / `person.<id>`).
+Once a library is switched to this agent, its old pinned IDs (`ASIN` / `ASIN_region`) keep working: on the next refresh the agent resolves the ASIN against AudiobookDB, populates metadata, and rewrites the pinned ID to the new native form (`book.<id>.release.<id>` / `person.<id>`). The automatic search path also reads the stored Audnexus GUID from the item's media tree, so a re-match uses the same ASIN before title search. This only works while the item still carries that GUID. A fresh library, or an item already reset to `local://`, has no prior ASIN to read. Back up the Plex database and export the old album and artist GUIDs before switching. Switch the existing library, do not recreate it.
 
-Two cases are left untouched and reported in the log:
+Cases that are left untouched and reported in the log:
 
 - An ASIN not in the AudiobookDB catalog — add the external link to AudiobookDB and retry.
-- An artist ASIN that resolves to multiple people — use **Fix Match** (or enter the person ID manually) to disambiguate before the ID can be rewritten.
+- A stored GUID that conflicts with a different file ASIN, or an artist ASIN that resolves to multiple people — use **Fix Match** (or enter the person ID manually) to decide before the ID can be rewritten.
+- A lookup that cannot be completed (auth, throttling, transport, server) — the item is left untouched and the automatic search stops for that item. Retry after the service recovers; do not treat it as a catalog miss.
 
 ## Source installation
 

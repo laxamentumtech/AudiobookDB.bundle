@@ -30,9 +30,10 @@ The legacy ID scheme is gone end to end. `check_for_asin`
 resolves a legacy ASIN through `api_client.resolve_asin_book` /
 `api_client.resolve_asin_person` and appends a native `book.<id>/.release.<id>` /
 `person.<id>` result (score 100). The agent's `search()` no longer appends
-anything itself. Artist ASIN quick match is manual-input only (legacy
-parity — album/track filenames are not scanned for artist ASINs). Legacy
-`ASIN_region` IDs stored by the old agent still parse via
+anything itself. Artist ASIN quick match remains manual-input only for
+scanned names and filenames. Automatic artist search also uses a stored
+Audnexus GUID, because that is a prior match rather than a filename guess.
+Legacy `ASIN_region` IDs stored by the old agent still parse via
 `metadata_ids.parse_metadata_id` and migrate on first update.
 
 ## 4. `metadata_arrs` logs value as key and key as label (inverted) — **KEPT**
@@ -102,8 +103,8 @@ implementation.
 
 ### 13. Filename ASIN regex `(?=.\d)` anchors the match, not the ASIN's end
 
-- **Where:** `search_tools.py:17` `asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')`
-  (inherited verbatim from the legacy agent).
+- **Where:** `asin_tools.py` `TYPED_ASIN_RE = re.compile(r'(?=.\d)[A-Z\d]{10}')`
+  (extracted from `search_tools.py`; inherited verbatim from the legacy agent).
 - **Behaviour:** The lookahead `(?=.\d)` runs at the match start: it requires
   that the character two positions ahead (the candidate's second character)
   is a digit. It does not look past the 10-character candidate, so nothing
