@@ -550,6 +550,7 @@ class TestAlbumSearch(unittest.TestCase):
             results, album_media(album=title, artist='A.Author'),
             plex_shim.Locale.Language.English, True)
         by_id = dict((r.id, r) for r in results.appended)
+        self.assertIn('[all editions]', by_id['book.' + book_id].name)
         one = by_id['book.' + book_id + '.release.rel1']
         two = by_id['book.' + book_id + '.release.rel2']
         self.assertIn('[Unabridged 2011]', one.name)
@@ -601,7 +602,7 @@ class TestAlbumSearch(unittest.TestCase):
         work, closer, other = results.appended
         self.assertEqual(work.id, 'book.' + book_id)
         self.assertEqual(work.score, 100)
-        self.assertEqual(work.name, '"The Martian" by A.Weir')
+        self.assertEqual(work.name, '"The Martian" by A.Weir [all editions]')
         self.assertIsNone(work.year)
         self.assertEqual(closer.id, work.id + '.release.rel2')
         self.assertGreater(closer.score, other.score)

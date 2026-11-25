@@ -84,6 +84,61 @@ def release_year(release):
     return None
 
 
+def release_publisher(release):
+    """
+        First usable publisher credited on a release, or None. The
+        credited name wins so the display matches the release's own
+        credit line.
+    """
+    if not isinstance(release, dict):
+        return None
+    publishers = release.get('publishers')
+    if not isinstance(publishers, list):
+        return None
+    for publisher in publishers:
+        if not isinstance(publisher, dict):
+            continue
+        for key in ('creditedName', 'name'):
+            name = unicode_text(publisher.get(key))
+            if name and name.strip():
+                return name.strip()
+    return None
+
+
+def edition_tags(releases):
+    """
+        Fix Match edition tags for the visible recording rows.
+
+        The release disambiguation is the tag. A tag two visible rows
+        share (for example two 'unabridged' releases) cannot tell them
+        apart, so the shared text is replaced by the release publisher,
+        or its release year when no publisher is credited.
+        """
+    tags = []
+    for index, release in enumerate(releases):
+        tag = unicode_text(release.get('disambiguation')) \
+            if isinstance(release, dict) else None
+        tags.append(tag or index + 1)
+    counts = {}
+    for tag in tags:
+        counts[tag] = counts.get(tag, 0) + 1
+    used = set(tags)
+    for index, tag in enumerate(tags):
+        if counts[tag] < 2:
+            continue
+        release = releases[index]
+        for detail in (release_publisher(release),
+                       release_year(release)):
+            if not detail:
+                continue
+            candidate = u'%s' % detail
+            if candidate not in used:
+                tags[index] = candidate
+                used.add(candidate)
+                break
+    return tags
+
+
 def image_thumb(image):
     """
         Small derivative URL for a catalog image, or None.

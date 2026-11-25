@@ -16,7 +16,7 @@ import api_client  # noqa: E402
 import __init__ as agent  # noqa: E402
 from search_tools import (  # noqa: E402
     SearchTool, AlbumSearchTool, ArtistSearchTool, ScoreTool,
-    image_thumb, release_year,
+    edition_tags, image_thumb, release_publisher, release_year,
     series_name_in_text, series_supports_number, series_hint_eligible,
 )
 

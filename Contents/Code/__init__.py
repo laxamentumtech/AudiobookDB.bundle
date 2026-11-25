@@ -5,7 +5,8 @@ from _version import version
 from logging import Logging
 import api_client
 from search_tools import (AlbumSearchTool, ArtistSearchTool, ScoreTool,
-                          image_thumb, release_narrators, release_year)
+                          edition_tags, image_thumb, release_narrators,
+                          release_year)
 import metadata_ids
 from update_tools import AlbumUpdateTool, ArtistUpdateTool
 
@@ -273,22 +274,29 @@ class AudiobookAlbum(Agent.Album):
             else:
                 # A work-only choice sitting next to specific recordings
                 # must not imply release-credit completeness. Plain search
-                # hits keep their explicit book-level narrator display.
-                self.append_album_match(search_helper, match, label,
-                                        include_book_narrators=not releases)
+                # hits keep their explicit book-level narrator display. The
+                # work row is marked so it is not read as a recording that
+                # simply lacks a year.
+                self.append_album_match(
+                    search_helper, match, label,
+                    include_book_narrators=not releases,
+                    edition=' [all editions]' if releases else '')
                 if releases:
                     ranked = sorted(releases, key=lambda release:
                                     self.recording_rank(release, hints))
-                    # Keep a work-only choice and bound edition rows per hit.
-                    for index, release in enumerate(ranked[:5]):
+                    # Keep a work-only choice and bound edition rows per
+                    # hit. Rows whose edition tags would otherwise read
+                    # identically carry the release publisher (or year).
+                    shown = ranked[:5]
+                    tags = edition_tags(shown)
+                    for index, release in enumerate(shown):
                         recording = dict(match)
                         recording['id'] = metadata_ids.serialize_book_id(
                             book_id, release['id'])
                         recording['score'] = match['score'] - (index + 1)
-                        edition = ' [%s]' % (
-                            release.get('disambiguation') or index + 1)
                         self.append_album_match(search_helper, recording,
-                                                label, release, edition)
+                                                label, release,
+                                                ' [%s]' % tags[index])
 
             if not manual and match['score'] >= GOOD_SCORE:
                 break
