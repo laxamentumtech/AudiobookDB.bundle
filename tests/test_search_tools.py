@@ -1072,6 +1072,52 @@ class TestImageAndDateHelpers(unittest.TestCase):
         self.assertIsNone(release_year({'releaseDate': 2020}))
         self.assertIsNone(release_year({'releaseDate': None}))
 
+    def test_release_publisher_prefers_credited_name(self):
+        self.assertEqual(release_publisher({'publishers': [
+            'junk',
+            {'name': 'Soundbooth Theater',
+             'creditedName': 'Soundbooth Theater LLC'},
+        ]}), 'Soundbooth Theater LLC')
+        # A blank credited name falls back to the publisher name.
+        self.assertEqual(release_publisher({'publishers': [
+            {'name': 'Spoken Realms', 'creditedName': '   '},
+        ]}), 'Spoken Realms')
+
+    def test_release_publisher_missing(self):
+        self.assertIsNone(release_publisher(None))
+        self.assertIsNone(release_publisher({'publishers': 'x'}))
+        self.assertIsNone(release_publisher({'publishers': [{'name': ''}]}))
+        self.assertIsNone(release_publisher({'publishers': []}))
+
+    def test_edition_tags_stay_plain_when_distinct(self):
+        self.assertEqual(edition_tags([
+            {'disambiguation': 'Unabridged 2011'},
+            {'disambiguation': 'Unabridged 2018'},
+        ]), ['Unabridged 2011', 'Unabridged 2018'])
+
+    def test_edition_tags_distinguish_identical_tags(self):
+        # The shared disambiguation cannot separate the rows; the
+        # publisher replaces it instead of repeating it twice.
+        self.assertEqual(edition_tags([
+            {'disambiguation': 'unabridged',
+             'publishers': [{'creditedName': 'Spoken Realms'}]},
+            {'disambiguation': 'unabridged',
+             'publishers': [{'name': 'Soundbooth Theater'}]},
+        ]), [u'Spoken Realms', u'Soundbooth Theater'])
+
+    def test_edition_tags_fall_back_to_release_year(self):
+        # No publisher credited: the year still separates the rows.
+        self.assertEqual(edition_tags([
+            {'disambiguation': 'unabridged', 'releaseDate': '2018-01-01'},
+            {'disambiguation': 'unabridged', 'releaseDate': '2025-01-01'},
+        ]), [u'2018', u'2025'])
+
+    def test_edition_tags_missing_or_malformed_disambiguation(self):
+        self.assertEqual(edition_tags([{'id': 'a'}, {'id': 'b'}]), [1, 2])
+        self.assertEqual(edition_tags([
+            None, {'disambiguation': ['x']}, {'disambiguation': 2020},
+        ]), [1, 2, 3])
+
     def test_first_image_thumb_skips_unusable_images(self):
         from search_tools import first_image_thumb
         # The first image is off-CDN (unusable); the second is a trusted

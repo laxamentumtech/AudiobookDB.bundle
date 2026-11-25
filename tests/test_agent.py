@@ -559,6 +559,60 @@ class TestAlbumSearch(unittest.TestCase):
         self.assertLessEqual(len(one.name), 60)
         self.assertLessEqual(len(two.name), 60)
 
+    def test_identical_edition_tags_gain_publisher(self):
+        # Two releases share the 'unabridged' tag, so their rows would
+        # read identically; the publisher distinguishes them (the year is
+        # already the Plex row year). The work row says it is not a
+        # recording.
+        book_id = 'hhhhhhhhhhhh'
+        detail_url = BASE + '/books/' + book_id + '?include=releases'
+        title = 'Vortena'
+        narrators = [
+            {'role': {'name': 'Narrator'},
+             'person': {'id': 'n1', 'name': 'Jeff Hays'}},
+        ]
+        detail = {
+            'id': book_id,
+            'title': title,
+            'releases': [
+                {'id': 'rel1', 'disambiguation': 'unabridged',
+                 'releaseDate': '2018-10-30T00:00:00Z',
+                 'publishers': [{'id': 'p1', 'name': 'Spoken Realms'}],
+                 'people': narrators},
+                {'id': 'rel2', 'disambiguation': 'unabridged',
+                 'releaseDate': '2025-10-10T00:00:00Z',
+                 'publishers': [{'id': 'p2', 'name': 'Soundbooth Theater'}],
+                 'people': narrators},
+            ],
+        }
+        hit = {
+            'id': book_id,
+            'title': title,
+            'people': [
+                {'role': {'name': 'Author'},
+                 'person': {'id': 'p1', 'name': 'N.Iliev'}},
+            ],
+            'originalLanguage': 'English',
+        }
+        install_transport([hit], {detail_url: (200, api_body(detail))})
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results, album_media(album=title, artist='N.Iliev'),
+            plex_shim.Locale.Language.English, True)
+        by_id = dict((r.id, r) for r in results.appended)
+        self.assertEqual(
+            by_id['book.' + book_id].name,
+            '"Vortena" by N.Iliev [all editions]')
+        self.assertIsNone(by_id['book.' + book_id].year)
+        one = by_id['book.' + book_id + '.release.rel1']
+        two = by_id['book.' + book_id + '.release.rel2']
+        self.assertIn('[Spoken Realms]', one.name)
+        self.assertIn('[Soundbooth Theater]', two.name)
+        self.assertNotIn('unabridged', one.name + two.name)
+        self.assertNotEqual(one.name, two.name)
+        self.assertLessEqual(len(one.name), 60)
+        self.assertLessEqual(len(two.name), 60)
+
     def test_plain_search_hit_keeps_book_narrator(self):
         hit = {
             'id': 'ffffffffffff',
