@@ -19,11 +19,16 @@ from logging import Logging
 from _version import version
 
 # The Plex sandbox does not expose the ``bytes`` name and on Python 2
-# ``str`` is bytes; resolve the type at import time.
+# ``str`` is bytes; resolve the types at import time.
 try:
     BYTES_TYPE = bytes
 except NameError:  # pragma: no cover - python 2 sandbox
     BYTES_TYPE = str
+
+try:
+    TEXT_TYPE = unicode
+except NameError:  # pragma: no cover - python 3
+    TEXT_TYPE = str
 
 log = Logging()
 
@@ -83,7 +88,13 @@ def decode(body):
     if body is None:
         return None
     if isinstance(body, BYTES_TYPE):
-        body = body.decode('utf-8')
+        # Undecodable bytes are an unusable response, not a crash: a bad
+        # UTF-8 body raises UnicodeDecodeError that would otherwise
+        # escape make_request_status and abort the search/update.
+        try:
+            body = body.decode('utf-8')
+        except ValueError:
+            return None
     if not body:
         return None
     try:
@@ -164,9 +175,21 @@ def request_with_retries(url, method=None, headers=None, data=None,
                 url, method=method, headers=headers or {}, data=data,
                 timeout=90
             )
-        except Exception:
+        except Exception as error:
             log.error('API request failed (attempt %d): %s' % (attempt, url))
-            response = None
+            # An eager transport raises its coded HTTPError in flight, so
+            # there is no response object to read. Recover the status from
+            # the exception so a definitive code (e.g. a confirmed 404)
+            # is classified by stop_on_status instead of being retried and
+            # reported as an unknown transport failure.
+            status = http_error_code(error)
+            if status is not None:
+                last_status = status
+                if status in stop_on_status:
+                    return (None, status)
+                if attempt < MAX_ATTEMPTS:
+                    sleep(DEFAULT_RETRY_AFTER)
+                continue
 
         if response is None:
             if attempt < MAX_ATTEMPTS:
@@ -413,7 +436,8 @@ def resolve_asin_book(asin):
         log.warn('ASIN %s lookup unavailable (status %s)' % (
             asin, status))
         return (None, None, LOOKUP_UNAVAILABLE)
-    if not isinstance(data, dict) or 'id' not in data:
+    book_id = data.get('id') if isinstance(data, dict) else None
+    if not isinstance(book_id, TEXT_TYPE) or not book_id:
         log.warn('ASIN %s lookup returned an unusable response' % asin)
         return (None, None, LOOKUP_UNAVAILABLE)
     return (data, data.get('matchedReleaseId'), LOOKUP_OK)
@@ -444,6 +468,17 @@ def resolve_asin_person(asin):
         return ([], LOOKUP_UNAVAILABLE)
     if not data:
         return ([], LOOKUP_MISSING)
+    for hit in data:
+        if not isinstance(hit, dict) \
+                or not isinstance(hit.get('id'), TEXT_TYPE) \
+                or not hit.get('id'):
+            # A hit without a usable id cannot be detail-fetched. Reject
+            # the whole response rather than drop the entry: silently
+            # dropping it could turn an ambiguous response into a
+            # singleton that auto-matches.
+            log.warn('ASIN %s people lookup returned an unusable response'
+                     % asin)
+            return ([], LOOKUP_UNAVAILABLE)
     return (data, LOOKUP_OK)
 
 
@@ -470,6 +505,15 @@ def get_person(person_id):
         GETs /people/{id}. Returns the decoded object or None on failure.
     """
     return make_request('%s/people/%s' % (BASE_URL, person_id))
+
+
+def get_person_status(person_id):
+    """
+        GETs /people/{id} and returns (decoded object or None, final
+        status), so a caller can tell a confirmed 404 from an unavailable
+        lookup (transport, server, or an unusable response).
+    """
+    return make_request_status('%s/people/%s' % (BASE_URL, person_id))
 
 
 def http_error_code(error):

@@ -511,6 +511,21 @@ class SearchTool:
             return None
         return parsed[1]
 
+    def stop_on_unavailable(self, asin, status):
+        """
+            True when an ASIN lookup came back LOOKUP_UNAVAILABLE and the
+            automatic path must stop for this item: an outage must not be
+            mistaken for a catalog miss, so the item is left for Fix Match
+            (or a later refresh) instead of falling back to a less precise
+            name search.
+        """
+        if status == api_client.LOOKUP_UNAVAILABLE:
+            log.warn(
+                'ASIN %s lookup unavailable; not falling back to a less '
+                'precise match.' % asin)
+            return True
+        return False
+
     def check_for_asin(self):
         """
             Checks the stored Plex GUID, scanner filename/parts, and the
@@ -518,8 +533,10 @@ class SearchTool:
             or a legacy ASIN.
 
             This is the sole appender of quick-match results: it appends
-            the result(s) itself and returns True when the caller must
-            stop the normal search, False to continue.
+            the result(s) itself when one matches, and returns True when
+            the caller must stop the normal search, False to continue. A
+            stop is not always an append: the conflict and unavailable
+            stops return True without appending.
 
             A stored Audnexus GUID is the previous agent's match. A
             confirmed miss falls through to file hints and title search.
@@ -534,6 +551,17 @@ class SearchTool:
             if stored_asin:
                 log.info('ASIN found in stored Plex GUID')
                 if self.content_type == 'books':
+                    # A distinct file ASIN contradicts the stored match;
+                    # check before appending so the conflict is not
+                    # masked by a score-100 stored result.
+                    distinct = [a for a in self.file_asins()
+                                if a != stored_asin]
+                    if distinct:
+                        log.info(
+                            'Stored ASIN %s conflicts with file '
+                            'ASIN(s) %s; not auto-matching.' % (
+                                stored_asin, ', '.join(distinct)))
+                        return True
                     appended, status = self.append_quick_match_book(
                         stored_asin)
                 else:
@@ -541,10 +569,7 @@ class SearchTool:
                         stored_asin)
                 if appended:
                     return True
-                if status == api_client.LOOKUP_UNAVAILABLE:
-                    log.warn(
-                        'Stored ASIN %s lookup unavailable; not falling '
-                        'back to a less precise match.' % stored_asin)
+                if self.stop_on_unavailable(stored_asin, status):
                     return True
 
         # Check scanner file hints for an ASIN if content type is books. A
@@ -554,14 +579,8 @@ class SearchTool:
         if self.content_type == 'books' and not self.manual:
             asins = self.file_asins()
             if stored_asin:
-                distinct = [asin for asin in asins if asin != stored_asin]
-                if distinct:
-                    log.info(
-                        'Stored ASIN %s conflicts with file ASIN(s) %s; '
-                        'not auto-matching.' % (
-                            stored_asin, ', '.join(distinct)))
-                    return True
-                # The file carried only the ID already looked up from the
+                # A distinct file ASIN already stopped the automatic path
+                # above, so the file carried only the ID read from the
                 # stored GUID. Do not repeat that lookup.
                 asins = []
             if len(asins) > 1:
@@ -570,6 +589,8 @@ class SearchTool:
             if asins:
                 log.info('ASIN found in file metadata')
                 appended, status = self.append_quick_match_book(asins[0])
+                if self.stop_on_unavailable(asins[0], status):
+                    return True
                 return appended
 
         # Check search query for an ID. The album fallback also runs in
@@ -600,11 +621,15 @@ class SearchTool:
             log.info('ASIN found in manual search')
             if self.content_type == 'books':
                 appended, status = self.append_quick_match_book(asin)
+                if self.stop_on_unavailable(asin, status):
+                    return True
                 return appended
             # Automatic person search must not guess.
             if not self.manual:
                 return False
             appended, status = self.append_quick_match_person(asin)
+            if self.stop_on_unavailable(asin, status):
+                return True
             return appended
 
         return False
@@ -695,7 +720,9 @@ class SearchTool:
         """
             Resolves a legacy artist ASIN and appends score-100 result(s).
             Returns (appended, lookup status). Ambiguous matches only
-            append in manual searches.
+            append in manual searches. A failed person-detail fetch
+            propagates LOOKUP_UNAVAILABLE so the automatic path stops
+            instead of falling through to a less precise match.
         """
         hits, status = api_client.resolve_asin_person(asin)
         if status != api_client.LOOKUP_OK:
@@ -713,15 +740,23 @@ class SearchTool:
                     asin, len(hits)))
                 return (False, api_client.LOOKUP_AMBIGUOUS)
             appended = False
+            unavailable = False
             for hit in hits:
-                if self.append_person_detail(hit['id'], asin):
+                ok, detail_status = self.append_person_detail(
+                    hit['id'], asin)
+                if ok:
                     appended = True
+                elif detail_status == api_client.LOOKUP_UNAVAILABLE:
+                    unavailable = True
             if appended:
                 return (True, api_client.LOOKUP_OK)
+            if unavailable:
+                return (False, api_client.LOOKUP_UNAVAILABLE)
             return (False, api_client.LOOKUP_REJECTED)
-        if self.append_person_detail(hits[0]['id'], asin):
+        ok, detail_status = self.append_person_detail(hits[0]['id'], asin)
+        if ok:
             return (True, api_client.LOOKUP_OK)
-        return (False, api_client.LOOKUP_REJECTED)
+        return (False, detail_status)
 
     def person_display_name(self, person):
         """
@@ -737,11 +772,20 @@ class SearchTool:
         """
             Fetches a person detail, optionally confirming the Audible
             external ASIN, and appends a score-100 result.
+
+            Returns (appended, lookup status): LOOKUP_OK when a result is
+            appended, LOOKUP_REJECTED for a successful detail response
+            that does not confirm the ASIN, and LOOKUP_UNAVAILABLE when
+            the detail fetch itself failed (an outage must stop the
+            automatic path, not fall through to a less precise match).
         """
-        person = api_client.get_person(person_id)
+        person, status = api_client.get_person_status(person_id)
         if person is None:
-            log.info('Person %s not found' % person_id)
-            return False
+            if status == 404:
+                log.info('Person %s not found' % person_id)
+                return (False, api_client.LOOKUP_MISSING)
+            log.warn('Person %s detail unavailable' % person_id)
+            return (False, api_client.LOOKUP_UNAVAILABLE)
         if asin:
             confirmed = False
             for ext in person.get('external') or []:
@@ -752,7 +796,7 @@ class SearchTool:
             if not confirmed:
                 log.info('Person %s does not confirm ASIN %s' % (
                     person_id, asin))
-                return False
+                return (False, api_client.LOOKUP_REJECTED)
         self.results.Append(
             MetadataSearchResult(
                 id=metadata_ids.serialize_person_id(person['id']),
@@ -762,7 +806,7 @@ class SearchTool:
                 year=None,
             )
         )
-        return True
+        return (True, api_client.LOOKUP_OK)
 
     def append_quick_match_person_id(self, person_id):
         """

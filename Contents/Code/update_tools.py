@@ -594,11 +594,6 @@ class ArtistUpdateTool(UpdateTool):
                         'ASIN %s lookup unavailable; leaving metadata '
                         'untouched.' % asin)
                 return False
-            if len(hits) == 0:
-                log.info(
-                    'ASIN %s not in AudiobookDB catalog; use Fix Match or '
-                    'add the external link to AudiobookDB.' % asin)
-                return False
             if len(hits) > 1:
                 log.info(
                     'ASIN %s is ambiguous (%d people); leaving metadata '

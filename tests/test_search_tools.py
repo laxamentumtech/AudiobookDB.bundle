@@ -360,6 +360,37 @@ class TestFileAsinHints(unittest.TestCase):
         self.assertEqual(tool.results.appended[0].id,
                          'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
 
+    def test_file_asin_unavailable_stops_without_fallback(self):
+        # A 500 from the file-ASIN lookup is an outage, not a catalog
+        # miss: the automatic path stops for the item, no title search.
+        install_transport({
+            BASE + '/audiobooks/external/audible/B00B5HZGUG': (500, ''),
+        })
+        tool = make('books', FakeMedia(filename='B00B5HZGUG'))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+        self.assertEqual(
+            len(self._asin_requests()), api_client.MAX_ATTEMPTS)
+
+    def test_typed_asin_unavailable_stops(self):
+        # A 500 from a typed-ASIN lookup stops the automatic path the
+        # same way a stored-ASIN outage does.
+        install_transport({
+            BASE + '/audiobooks/external/audible/A000000001': (500, ''),
+        })
+        tool = make('books', FakeMedia(album='Title A000000001'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+        self.assertEqual(
+            len(self._asin_requests()), api_client.MAX_ATTEMPTS)
+
 
 class TestStoredPlexGuid(unittest.TestCase):
     """The previous Audnexus match is the first automatic ID source."""
@@ -435,8 +466,23 @@ class TestStoredPlexGuid(unittest.TestCase):
                 'com.plexapp.agents.audnexus://B00B5HZGUG?lang=en'))))
         self.assertTrue(tool.check_for_asin())
         self.assertEqual(tool.results.appended, [])
-        # Only the stored GUID was looked up; the distinct file ASIN is
-        # left for Fix Match.
+        # The conflict is detected before any lookup: neither the stored
+        # ASIN nor the distinct file ASIN is resolved; the item is left
+        # for Fix Match.
+        self.assertEqual(self._asin_requests(), [])
+
+    def test_stored_guid_hit_with_matching_file_asin_emitted(self):
+        # The file carries the same ASIN as the stored GUID: no conflict,
+        # so the stored match is emitted and no second lookup is made.
+        install_transport(self._book_mapping())
+        tool = make('books', FakeMedia(
+            filename='B00B5HZGUG',
+            tree=FakeTree(guid=(
+                'com.plexapp.agents.audnexus://B00B5HZGUG?lang=en'))))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(len(tool.results.appended), 1)
+        self.assertEqual(tool.results.appended[0].id,
+                         'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
         self.assertEqual(len(self._asin_requests()), 1)
         self.assertTrue(
             self._asin_requests()[0][0].endswith('/B00B5HZGUG'))
@@ -536,6 +582,25 @@ class TestStoredPlexGuidPeople(unittest.TestCase):
         self.assertEqual(tool.results.appended, [])
         self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
 
+    def test_stored_guid_detail_fetch_failure_stops(self):
+        # The ASIN resolves to one person, but the person-detail GET
+        # fails (500). A failed detail fetch is an outage, not a
+        # rejection: the automatic path stops instead of falling through
+        # to a name search.
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (200, api_body(load_fixture(
+                    'person_external_resolve_B00G0WYW92.json'))),
+            BASE + '/people/ypMPwXzWXaiX': (500, ''),
+        })
+        tool = make('authors', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00G0WYW92?lang=en')))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        # Resolve (1) + detail fetches (MAX_ATTEMPTS each, one person).
+        self.assertEqual(
+            len(HTTP.requests), 1 + api_client.MAX_ATTEMPTS)
+
 
 class TestCheckForAsinPeople(unittest.TestCase):
     """Quick-match person appends (legacy ASIN and native IDs)."""
@@ -568,6 +633,42 @@ class TestCheckForAsinPeople(unittest.TestCase):
         tool = make('authors', FakeMedia(artist='Andy Weir B00G0WYW92'))
         self.assertFalse(tool.check_for_asin())
         self.assertEqual(tool.results.appended, [])
+
+    def test_manual_typed_person_asin_unavailable_stops(self):
+        # A 500 from the people lookup for a typed author ASIN stops the
+        # search: no result is appended and no /search request is made.
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2': (500, ''),
+        })
+        tool = make('authors', FakeMedia(artist='Andy Weir B00G0WYW92'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+        people_reqs = [req for req in HTTP.requests
+                       if req[0] ==
+                       BASE + '/people?external=Audible%3AB00G0WYW92&take=2']
+        self.assertEqual(len(people_reqs), api_client.MAX_ATTEMPTS)
+
+    def test_manual_typed_person_asin_detail_404_falls_through(self):
+        # The ASIN resolves to one person, but the person-detail GET is a
+        # confirmed 404: the lookup is a catalog miss, not an outage, so
+        # the search continues (returns False) with no quick match.
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2': (
+                200, api_body(
+                    load_fixture('person_external_resolve_B00G0WYW92.json'))),
+            BASE + '/people/ypMPwXzWXaiX': (404, ''),
+        })
+        tool = make('authors', FakeMedia(artist='Andy Weir B00G0WYW92'),
+                    manual=True)
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        # Resolve (1) + detail fetches (MAX_ATTEMPTS each, one person).
+        self.assertEqual(
+            len(HTTP.requests), 1 + api_client.MAX_ATTEMPTS)
 
     def test_artist_404_returns_false(self):
         install_transport({})

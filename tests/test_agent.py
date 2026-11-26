@@ -907,14 +907,11 @@ class TestAlbumQuickMatch(unittest.TestCase):
         self.assertEqual(len(asin_reqs), api_client.MAX_ATTEMPTS)
 
     def test_stored_guid_conflict_stops_without_either_lookup(self):
-        mapping = dict(default_mapping())
-        mapping[BASE + '/audiobooks/external/audible/B00B5HZGUG'] = (404, '')
-        mapping[BASE + '/audiobooks/external/audible/B00G0WYW92'] = (
-            200,
-            api_body(load_fixture(
-                'book_external_resolve_B00B5HZGUG.json')))
-        install_transport(load_fixture('search_books_martian.json'),
-                          mapping=mapping)
+        # The file carries a distinct ASIN from the stored GUID. The
+        # conflict is detected before any lookup, so neither the stored
+        # ASIN nor the file ASIN is resolved; the item is left for Fix
+        # Match and no title search runs.
+        install_transport(load_fixture('search_books_martian.json'))
         results = _Results()
         agent.AudiobookAlbum().search(
             results,
@@ -930,8 +927,7 @@ class TestAlbumQuickMatch(unittest.TestCase):
         self.assertEqual(search_reqs, [])
         asin_reqs = [req for req in HTTP.requests
                      if '/audiobooks/external/audible/' in req[0]]
-        self.assertEqual(len(asin_reqs), 1)
-        self.assertTrue(asin_reqs[0][0].endswith('/B00B5HZGUG'))
+        self.assertEqual(asin_reqs, [])
 
 
 class TestAlbumUpdate(unittest.TestCase):

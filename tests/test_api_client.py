@@ -313,6 +313,35 @@ class TestResolveAsinBook(unittest.TestCase):
             api_client.resolve_asin_book('BBBBBBBBBB'),
             (None, None, api_client.LOOKUP_UNAVAILABLE))
 
+    def test_null_id_is_unusable(self):
+        # A 200 whose book has no usable id cannot be serialized to a
+        # Plex ID; the response is unusable at the resolver boundary.
+        install_transport({
+            BASE + '/audiobooks/external/audible/BBBBBBBBBB':
+                (200, '{"id": null}'),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_book('BBBBBBBBBB'),
+            (None, None, api_client.LOOKUP_UNAVAILABLE))
+
+    def test_numeric_id_is_unusable(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/BBBBBBBBBB':
+                (200, '{"id": 42}'),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_book('BBBBBBBBBB'),
+            (None, None, api_client.LOOKUP_UNAVAILABLE))
+
+    def test_missing_id_is_unusable(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/BBBBBBBBBB':
+                (200, '{"title": "The Martian"}'),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_book('BBBBBBBBBB'),
+            (None, None, api_client.LOOKUP_UNAVAILABLE))
+
 
 class TestResolveAsinPerson(unittest.TestCase):
     def test_single_hit(self):
@@ -350,6 +379,38 @@ class TestResolveAsinPerson(unittest.TestCase):
             api_client.resolve_asin_person('B00G0WYW92'),
             ([], api_client.LOOKUP_UNAVAILABLE))
         self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
+
+    def test_hit_without_id_is_unusable(self):
+        # A person hit with no usable id cannot be detail-fetched; the
+        # whole response is unusable (not silently dropped, which could
+        # turn an ambiguous response into a singleton).
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (200, '[{}]'),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_person('B00G0WYW92'),
+            ([], api_client.LOOKUP_UNAVAILABLE))
+
+    def test_hit_with_null_id_is_unusable(self):
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (200, '[{"id": null}]'),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_person('B00G0WYW92'),
+            ([], api_client.LOOKUP_UNAVAILABLE))
+
+    def test_non_list_200_is_unusable(self):
+        # A successful response whose decoded JSON is not a list (e.g. an
+        # object) is unusable, not a confirmed miss.
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (200, '{"id": "ypMPwXzWXaiX"}'),
+        })
+        self.assertEqual(
+            api_client.resolve_asin_person('B00G0WYW92'),
+            ([], api_client.LOOKUP_UNAVAILABLE))
 
 
 class TestDetailAndGetters(unittest.TestCase):
@@ -907,6 +968,86 @@ class TestAnonymousCoded403(unittest.TestCase):
         self.assertEqual([r[1] for r in HTTP.requests],
                          ['GET', 'POST', 'GET', 'POST'])
         self.assertEqual(calls['post'], 2)
+
+
+class TestEagerCodedError(unittest.TestCase):
+    """An eager transport raises its coded HTTPError in flight; the status
+    must be recovered from the exception, not discarded as an unknown
+    transport failure."""
+
+    def setUp(self):
+        self._key = Prefs.get('api_key', '')
+        Prefs['api_key'] = ''
+
+    def tearDown(self):
+        Prefs['api_key'] = self._key
+
+    def test_eager_coded_404_is_terminal(self):
+        from plex_shim import HTTPError
+
+        def transport(url, method='GET', headers=None, data=None):
+            raise HTTPError(url, 404, 'Not Found', None, None)
+
+        install_transport({})
+        HTTP.transport = transport
+        data, status = api_client.make_request_status(
+            BASE + '/x', api_client.ASIN_TERMINAL_STATUSES)
+        self.assertIsNone(data)
+        self.assertEqual(status, 404)
+        # A confirmed miss is terminal: one request, no retry budget spent.
+        self.assertEqual(len(HTTP.requests), 1)
+
+    def test_eager_coded_500_reports_the_code(self):
+        from plex_shim import HTTPError
+
+        def transport(url, method='GET', headers=None, data=None):
+            raise HTTPError(url, 500, 'Server Error', None, None)
+
+        install_transport({})
+        HTTP.transport = transport
+        data, status = api_client.make_request_status(
+            BASE + '/x', api_client.ASIN_TERMINAL_STATUSES)
+        self.assertIsNone(data)
+        # The coded status survives the retry loop (not None/unknown).
+        self.assertEqual(status, 500)
+        self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
+
+    def test_eager_coded_404_resolve_is_missing(self):
+        from plex_shim import HTTPError
+
+        def transport(url, method='GET', headers=None, data=None):
+            raise HTTPError(url, 404, 'Not Found', None, None)
+
+        install_transport({})
+        HTTP.transport = transport
+        book, matched, status = api_client.resolve_asin_book('B0AAAAAAAA')
+        self.assertIsNone(book)
+        self.assertIsNone(matched)
+        # A confirmed miss, not an outage: the file/title fallback runs.
+        self.assertEqual(status, api_client.LOOKUP_MISSING)
+        self.assertEqual(len(HTTP.requests), 1)
+
+
+class TestDecodeBadUtf8(unittest.TestCase):
+    """A 200 whose body is not valid UTF-8 is an unusable response, not a
+    crash (on Python 2 the decode raises UnicodeDecodeError)."""
+
+    def test_invalid_utf8_bytes_return_none(self):
+        self.assertIsNone(api_client.decode(b'\xff\xfe{"a": 1}'))
+
+    def test_valid_utf8_bytes_decode(self):
+        self.assertEqual(api_client.decode(b'{"a": 1}'), {'a': 1})
+
+    def test_make_request_bad_utf8_is_unavailable(self):
+        # A 200 carrying undecodable bytes decodes to None, so an ASIN
+        # resolve reports an unusable response, not a raised exception.
+        install_transport({
+            BASE + '/audiobooks/external/audible/B0AAAAAAAA':
+                (200, b'\xff\xfe{"id": "x"}'),
+        })
+        book, matched, status = api_client.resolve_asin_book('B0AAAAAAAA')
+        self.assertIsNone(book)
+        self.assertEqual(status, api_client.LOOKUP_UNAVAILABLE)
 
 
 if __name__ == '__main__':

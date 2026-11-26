@@ -17,7 +17,8 @@ FILE_ASIN_RE = re.compile(
 
 def typed_asin_match(value):
     """
-        Returns the first ten-character ID-shaped token in value, or None.
+        Returns the first ten-character ID-shaped token in value as a
+        re.Match (read the token with .group(0)), or None.
 
         This is the broad grammar for text a user typed. It is wider than
         the scanner hint grammar on purpose.

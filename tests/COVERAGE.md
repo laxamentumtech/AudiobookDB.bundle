@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 463 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 481 tests, 0 network.
 
 The test transport double (`tests/plex_shim.py`) has two modes: an
 eager default, and a `lazy=True` mode that mirrors Plex's real
@@ -36,15 +36,15 @@ contract is what gets exercised.
 | `TestAlbumUpdate` | 11 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only), forced update with empty/null description keeps the existing summary and still writes title/studio/styles/native ID; unavailable ASIN lookup and invalid ID leave metadata untouched |
 | `TestArtistSearchAndUpdate` | 11 | artist `search` + `update` round trip; stored GUID single/ambiguous/unconfirmed/outage paths; legacy ASIN migration; 404 and unavailable lookups leave the item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID; same-name people stay distinct and show their disambiguation |
 
-## `test_api_client.py` (66 tests)
+## `test_api_client.py` (78 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestMakeRequest` | 7 | `make_request`: 200, 404, non-2xx, malformed JSON, error envelope, exhausted attempts → `None` |
 | `TestFetchBytes` | 10 | `fetch_bytes`: returns raw bytes; raises `IOError` after exhaustion; non-HTTPS and untrusted-host URLs refused before any request; redirect to allowlisted host (absolute + relative) followed; redirect to off-allowlist host / http scheme blocked (target never requested); 3xx loop stopped at `MAX_IMAGE_REDIRECTS`; redirect without `Location` raises |
 | `TestPostJson` | 2 | `post_json`: headers + JSON body; failure → `None` |
-| `TestResolveAsinBook` | 5 | `resolve_asin_book`: single hit → book + release + `LOOKUP_OK`; 404 → `LOOKUP_MISSING` with one request; 401 terminal; 500/malformed → `LOOKUP_UNAVAILABLE` |
-| `TestResolveAsinPerson` | 4 | `resolve_asin_person`: single hit → hits + `LOOKUP_OK`; 200 empty/404 → `LOOKUP_MISSING`; 500 → `LOOKUP_UNAVAILABLE` |
+| `TestResolveAsinBook` | 8 | `resolve_asin_book`: single hit → book + release + `LOOKUP_OK`; 404 → `LOOKUP_MISSING` with one request; 401 terminal; 500/malformed → `LOOKUP_UNAVAILABLE`; null/numeric/missing ID on a hit → `LOOKUP_UNAVAILABLE` |
+| `TestResolveAsinPerson` | 7 | `resolve_asin_person`: single hit → hits + `LOOKUP_OK`; 200 empty/404 → `LOOKUP_MISSING`; 500 → `LOOKUP_UNAVAILABLE`; hit with missing/null ID → `LOOKUP_UNAVAILABLE`; non-list JSON on 200 → `LOOKUP_UNAVAILABLE` |
 | `TestDetailAndGetters` | 7 | `get_book` (+ `include=chapters`), `get_release`, `get_person`, `get_ratings`, `search` (book/people fixtures, short-q with no filters → `[]` with no request) |
 | `TestRetryAfter` | 7 | 429 + `Retry-After` retry then success; exhausted → `None`; oversized value clamped to `MAX_RETRY_AFTER`; negative value falls back to default; future HTTP-date waits until the requested time; past HTTP-date falls back to default |
 | `TestSearchHandshake` | 14 | anonymous CSRF handshake: same-origin prime GET, double-submit token in header + Cookie, keyed bypass skips the prime, token cached per process, stale token → cache-busted re-prime (jar-held cookie) + one bounded retry, 403 twice → `None` without looping, prime without cookie / prime transport failure → `None`, `includeFields` list and comma-string forms, lazy-transport handshake and non-2xx surfacing |
@@ -52,6 +52,8 @@ contract is what gets exercised.
 | `TestLazyNon2xxHeaders` | 3 | a lazy non-2xx (429/3xx) loads the body before any headers read: the coded `HTTPError` drives the retry/`IOError` contract, no `RuntimeError` escape; an uncoded body failure retries to `None` |
 | `TestJarCsrfToken` | 3 | `jar_csrf_token`: attribute-only CookieObject (the framework shape), dict-cookie value reads, comma-joined `Set-Cookie` header value |
 | `TestAnonymousCoded403` | 1 | a coded 403 `HTTPError` raised in flight by an eager transport reaches `search()`'s re-prime branch (prime, rejected POST, re-prime, accepted POST) instead of being swallowed by the blanket except |
+| `TestEagerCodedError` | 3 | coded `HTTPError` from an eager transport through `make_request_status`: 404 terminal (one request), 500 reports the code after full retry; 404 in `resolve_asin_book` → `LOOKUP_MISSING` |
+| `TestDecodeBadUtf8` | 3 | `decode`: invalid UTF-8 → `None`, valid bytes decode; 200 with undecodable body in `resolve_asin_book` → `LOOKUP_UNAVAILABLE` |
 
 ## `test_logging.py` (16 tests)
 
@@ -72,15 +74,15 @@ contract is what gets exercised.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (197 tests)
+## `test_search_tools.py` (203 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestCheckForAsinBooks` | 11 | album ASIN check: filename, album, and native `book.` ID sources (incl. release pair with the complete narrator list), release/ASIN/ID 404s, release without a book, and non-ID input → `False` |
-| `TestFileAsinHints` | 8 | filename ASIN hints: detection, suffixes, non-ASIN ignored |
-| `TestStoredPlexGuid` | 10 | stored Audnexus GUID extraction (region/query), scheme rejection including local/none/foreign payloads that would pass the raw parser, missing tree/guid, hit, same-ASIN dedupe, conflict stop, unavailable/401 stop, manual override, native skip |
-| `TestStoredPlexGuidPeople` | 4 | stored artist GUID: single hit, ambiguous fallthrough, unconfirmed detail fallthrough, unavailable stop |
-| `TestCheckForAsinPeople` | 9 | artist ASIN check: sources, non-ASIN ignored, disambiguation in native-ID quick match |
+| `TestFileAsinHints` | 10 | filename ASIN hints: detection from all name parts (tree absent still uses filename), case-insensitive dedupe, conflicting parts skip the lookup and fall through, manual typed query ignores file ASINs, bounded match, non-Audible token ignored, legacy grammar kept, unavailable lookup stops without fallback |
+| `TestStoredPlexGuid` | 11 | stored Audnexus GUID extraction (region/query), scheme rejection including local/none/foreign payloads that would pass the raw parser, missing tree/guid, hit, same-ASIN dedupe (a miss does not retry the same file ASIN), conflict stop, unavailable/401 stop, manual override, native skip |
+| `TestStoredPlexGuidPeople` | 5 | stored artist GUID: single hit, ambiguous fallthrough, unconfirmed detail fallthrough, unavailable stop, detail-fetch failure stop |
+| `TestCheckForAsinPeople` | 11 | artist ASIN check: sources, non-ASIN ignored, disambiguation in native-ID quick match; unavailable people lookup stops without search; detail 404 is a catalog miss, search continues |
 | `TestSearchToolHelpers` | 5 | `validate_author_name`: clears bad, keeps good, sets primary author |
 | `TestAlbumSearchToolBody` | 6 | `build_search_body`: with/without artist filters, too-short → `None`, nothing → `None`, filters-only (short title + artist) |
 | `TestAlbumParentAuthor` | 6 | parent author ID wiring: matched native person ID as evidence, mismatch/absence tolerated |
@@ -92,7 +94,7 @@ contract is what gets exercised.
 | `TestAlbumReleasesForBook` | 5 | `releases_for_book`: original dicts returned, duplicate IDs deduped, merged-book 301 to winner resolved, release for another book filtered, failure/empty → `[]` |
 | `TestRecordingHints` | 11 | `recording_hints`: track duration and language signals, partial/absent → `None`, unmapped stream code without a usable label → no hint, display label in the code field is a hint |
 | `TestFoldAccentsSandbox` | 1 | `fold_accents`/`phrase_key` index text instead of iterating it, so the Plex sandbox's `x.__iter__()` iteration cannot raise on Python 2 `unicode` |
-| `TestImageAndDateHelpers` | 15 | `image_thumb`, `release_year` (non-text date → missing), `release_publisher` (credited name, name fallback, singular `publisher` payload, malformed), `edition_tags` (plain distinct tags, publisher/year disambiguation for shared tags, bounded publisher text, numbered fallback when nothing separates rows, rendered-text comparison, positional fallback for malformed data), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
+| `TestImageAndDateHelpers` | 18 | `image_thumb` (small derivative, untrusted URL rejected), `release_year` (non-text date → missing), `release_publisher` (credited name, name fallback, singular `publisher` payload, malformed), `edition_tags` (plain distinct tags, publisher/year disambiguation for shared tags, release-year fallback, bounded publisher text, bounded unique long tag, numbered fallback when nothing separates rows, numbered text within limit, failed group leaves no stale reservation, rendered-text comparison, positional fallback for malformed data), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
 | `TestArtistSearchToolBody` | 2 | `build_search_body` (artist): body, too-short → `None` |
 | `TestCleanupAuthorName` | 4 | `cleanup_author_name`: role removals, diacritics |
 | `TestArtistMultiArtist` | 5 | `find_non_contributor`, `handle_multi_artist`, `get_primary_author` |
