@@ -168,6 +168,11 @@ def artist_media(**kw):
     return FakeMedia(**kw)
 
 
+def guid_tree(guid):
+    """Minimal media tree carrying only the item's Plex GUID."""
+    return type('GuidTree', (), {'guid': guid})()
+
+
 class TestStartAndIdentity(unittest.TestCase):
     def test_start_headers(self):
         _prefs()
@@ -845,6 +850,85 @@ class TestAlbumQuickMatch(unittest.TestCase):
         # which 404s too -> no results.
         self.assertEqual(results.appended, [])
 
+    def test_stored_guid_appends_single_score_100(self):
+        install_transport(None)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results,
+            album_media(tree=guid_tree(
+                'com.plexapp.agents.audnexus://B00B5HZGUG?lang=en')),
+            plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(len(results.appended), 1)
+        self.assertEqual(
+            results.appended[0].id,
+            'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        self.assertEqual(results.appended[0].score, 100)
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+
+    def test_stored_guid_404_falls_through_to_search(self):
+        mapping = dict(default_mapping())
+        mapping[BASE + '/audiobooks/external/audible/B00B5HZGUG'] = (404, '')
+        install_transport(load_fixture('search_books_martian.json'),
+                          mapping=mapping)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results,
+            album_media(tree=guid_tree(
+                'com.plexapp.agents.audnexus://B00B5HZGUG?lang=en')),
+            plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(len(results.appended), 1)
+        self.assertEqual(results.appended[0].id, 'book.WQQDcMBQ3qUT')
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertTrue(search_reqs)
+
+    def test_stored_guid_unavailable_stops_without_search(self):
+        mapping = dict(default_mapping())
+        mapping[BASE + '/audiobooks/external/audible/B00B5HZGUG'] = (500, '')
+        install_transport(load_fixture('search_books_martian.json'),
+                          mapping=mapping)
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results,
+            album_media(tree=guid_tree(
+                'com.plexapp.agents.audnexus://B00B5HZGUG?lang=en')),
+            plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+        asin_reqs = [req for req in HTTP.requests
+                     if '/audiobooks/external/audible/' in req[0]]
+        self.assertEqual(len(asin_reqs), api_client.MAX_ATTEMPTS)
+
+    def test_stored_guid_conflict_stops_without_either_lookup(self):
+        # The file carries a distinct ASIN from the stored GUID. The
+        # conflict is detected before any lookup, so neither the stored
+        # ASIN nor the file ASIN is resolved; the item is left for Fix
+        # Match and no title search runs.
+        install_transport(load_fixture('search_books_martian.json'))
+        results = _Results()
+        agent.AudiobookAlbum().search(
+            results,
+            album_media(filename='B00G0WYW92',
+                        tree=guid_tree(
+                            'com.plexapp.agents.audnexus://B00B5HZGUG'
+                            '?lang=en')),
+            plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+        asin_reqs = [req for req in HTTP.requests
+                     if '/audiobooks/external/audible/' in req[0]]
+        self.assertEqual(asin_reqs, [])
+
 
 class TestAlbumUpdate(unittest.TestCase):
     """New-behavior checks 3, 5, 6, 7: album update migration."""
@@ -900,6 +984,33 @@ class TestAlbumUpdate(unittest.TestCase):
         self.assertEqual(metadata.genres, set())
         self.assertEqual(metadata.styles, set())
         self.assertEqual(metadata.moods, set())
+
+    def test_unavailable_leaves_untouched(self):
+        mapping = default_mapping()
+        mapping[BASE + '/audiobooks/external/audible/B0AAAAAAAA'] = (500, '')
+        metadata = self._run_update('B0AAAAAAAA_us', mapping=mapping)
+        self.assertEqual(metadata.id, 'B0AAAAAAAA_us')
+        self.assertIsNone(metadata.title)
+        self.assertIsNone(metadata.summary)
+        self.assertIsNone(metadata.studio)
+        asin_reqs = [req for req in HTTP.requests
+                     if '/audiobooks/external/audible/' in req[0]]
+        self.assertEqual(len(asin_reqs), api_client.MAX_ATTEMPTS)
+
+    def test_invalid_id_does_not_fall_back_to_media_guid(self):
+        install_transport(None)
+        media = FakeMedia(
+            title='The Martian',
+            tree=guid_tree(
+                'com.plexapp.agents.audnexus://B00B5HZGUG?lang=en'))
+        metadata = FakeMetadata('not-an-id')
+        agent.AudiobookAlbum().update(
+            metadata, media, plex_shim.Locale.Language.English, False)
+        self.assertEqual(metadata.id, 'not-an-id')
+        self.assertIsNone(metadata.title)
+        asin_reqs = [req for req in HTTP.requests
+                     if '/audiobooks/external/audible/' in req[0]]
+        self.assertEqual(asin_reqs, [])
 
     def test_no_release_work_only_path(self):
         """Check 6: work-only book -> book-level fields, no release writes."""
@@ -1084,6 +1195,42 @@ class TestArtistSearchAndUpdate(unittest.TestCase):
             self.assertEqual(results.appended, [])
             self.assertEqual(HTTP.requests, [])
 
+    def test_stored_guid_single_hit_appends(self):
+        install_transport(None)
+        results = _Results()
+        agent.AudiobookArtist().search(
+            results,
+            artist_media(tree=guid_tree(
+                'com.plexapp.agents.audnexus://B00G0WYW92?lang=en')),
+            plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(len(results.appended), 1)
+        self.assertEqual(results.appended[0].id, 'person.ypMPwXzWXaiX')
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+
+    def test_stored_guid_unavailable_stops_without_search(self):
+        mapping = default_mapping()
+        mapping[BASE + '/people?external=Audible%3AB00G0WYW92&take=2'] = (
+            500, '')
+        install_transport(load_fixture('search_people_andy_weir.json'),
+                          mapping=mapping)
+        results = _Results()
+        agent.AudiobookArtist().search(
+            results,
+            artist_media(tree=guid_tree(
+                'com.plexapp.agents.audnexus://B00G0WYW92?lang=en')),
+            plex_shim.Locale.Language.English,
+            False)
+        self.assertEqual(results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+        people_reqs = [req for req in HTTP.requests
+                       if '/people?external=' in req[0]]
+        self.assertEqual(len(people_reqs), api_client.MAX_ATTEMPTS)
+
     def test_legacy_asin_migration(self):
         install_transport(None)
         media = FakeMedia(title='Andy Weir')
@@ -1104,6 +1251,21 @@ class TestArtistSearchAndUpdate(unittest.TestCase):
         self.assertEqual(metadata.id, 'B0AAAAAAAA')
         self.assertIsNone(metadata.title)
         self.assertIsNone(metadata.summary)
+
+    def test_unavailable_leaves_untouched(self):
+        mapping = default_mapping()
+        mapping[BASE + '/people?external=Audible%3AB00G0WYW92&take=2'] = (
+            500, '')
+        install_transport(None, mapping=mapping)
+        metadata = FakeMetadata('B00G0WYW92')
+        agent.AudiobookArtist().update(
+            metadata, FakeMedia(title='Andy Weir'),
+            plex_shim.Locale.Language.English, False)
+        self.assertEqual(metadata.id, 'B00G0WYW92')
+        self.assertIsNone(metadata.title)
+        people_reqs = [req for req in HTTP.requests
+                       if '/people?external=' in req[0]]
+        self.assertEqual(len(people_reqs), api_client.MAX_ATTEMPTS)
 
     def test_empty_description_keeps_summary_and_completes_update(self):
         """An unavailable bio is non-destructive on a forced update."""

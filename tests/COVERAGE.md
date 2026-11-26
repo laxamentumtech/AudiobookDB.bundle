@@ -1,7 +1,7 @@
 # Test Coverage Map
 
 Fixture-backed, offline. `make test` (Python 3) and `make test-py2`
-(python:2.7-slim in docker, full unittest discovery). 419 tests, 0 network.
+(python:2.7-slim in docker, full unittest discovery). 481 tests, 0 network.
 
 The test transport double (`tests/plex_shim.py`) has two modes: an
 eager default, and a `lazy=True` mode that mirrors Plex's real
@@ -18,6 +18,7 @@ contract is what gets exercised.
 |---|---|
 | `__init__.py` (AudiobookAlbum/Artist: Start, ValidatePrefs, getDateFromString, search, update, compile_metadata) | `test_agent.py` |
 | `api_client.py` | `test_api_client.py` |
+| `asin_tools.py` | `test_asin_tools.py` |
 | `logging.py` | `test_logging.py` |
 | `metadata_ids.py` | `test_metadata_ids.py` |
 | `credits.py` | `test_update_tools.py`, `test_search_tools.py` (credit parsing) |
@@ -25,25 +26,25 @@ contract is what gets exercised.
 | `update_tools.py` | `test_update_tools.py` |
 | (sandbox compliance of every shipped module) | `test_sandbox_compliance.py` (8 tests: restricted names and builtins, augmented assignment rules, code-dir presence) |
 
-## `test_agent.py` (45 tests) — end-to-end agent flows
+## `test_agent.py` (54 tests) — end-to-end agent flows
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestStartAndIdentity` | 4 | `Start`, `ValidatePrefs`, `getDateFromString`, agent name/prefix constants |
 | `TestAlbumSearch` | 21 | `AudiobookAlbum.search` end-to-end: POSTed body, serialized IDs, GOOD_SCORE short-circuit (auto breaks at ≥98, manual keeps all), manual edition rows (recordings only when the book has releases, the work row only when it has none, up to 5 ranked recordings with release cover/year), complete narrator lists on search hits and release rows, explicit count within the 60-character budget, release rows show their own narrator while plain hits keep book-level narrators, edition discriminators preserved in identical recording rows, shared edition tags gaining publisher or release year, Fix Match series-name hint (lift into a gap, title-rank preserved on a real base tie, 100 cap, base-snapshot staircase, auto untouched) |
-| `TestAlbumQuickMatch` | 3 | `search` ASIN quick-match: album/filename ASIN → single 100-point result; unresolvable ASIN falls through |
-| `TestAlbumUpdate` | 9 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only), forced update with empty/null description keeps the existing summary and still writes title/studio/styles/native ID |
-| `TestArtistSearchAndUpdate` | 8 | artist `search` + `update` round trip; legacy ASIN migration; 404 leaves item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID; same-name people stay distinct and show their disambiguation |
+| `TestAlbumQuickMatch` | 7 | `search` ASIN quick-match: stored Audnexus GUID, album/filename ASIN → single 100-point result; stored GUID 404 falls through to search; unavailable stored lookup stops without search; stored/file conflict stops; unresolvable ASIN falls through |
+| `TestAlbumUpdate` | 11 | `update` end-to-end: full release, work-only (no release writes), pinned-release 404 fail-closed, search→update native round trip (detail endpoints only), forced update with empty/null description keeps the existing summary and still writes title/studio/styles/native ID; unavailable ASIN lookup and invalid ID leave metadata untouched |
+| `TestArtistSearchAndUpdate` | 11 | artist `search` + `update` round trip; stored GUID single/ambiguous/unconfirmed/outage paths; legacy ASIN migration; 404 and unavailable lookups leave the item untouched; forced update with empty bio keeps the existing summary and still writes name/genres/native ID; same-name people stay distinct and show their disambiguation |
 
-## `test_api_client.py` (61 tests)
+## `test_api_client.py` (78 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestMakeRequest` | 7 | `make_request`: 200, 404, non-2xx, malformed JSON, error envelope, exhausted attempts → `None` |
 | `TestFetchBytes` | 10 | `fetch_bytes`: returns raw bytes; raises `IOError` after exhaustion; non-HTTPS and untrusted-host URLs refused before any request; redirect to allowlisted host (absolute + relative) followed; redirect to off-allowlist host / http scheme blocked (target never requested); 3xx loop stopped at `MAX_IMAGE_REDIRECTS`; redirect without `Location` raises |
 | `TestPostJson` | 2 | `post_json`: headers + JSON body; failure → `None` |
-| `TestResolveAsinBook` | 2 | `resolve_asin_book`: single hit → book ID; 404 → `None` |
-| `TestResolveAsinPerson` | 2 | `resolve_asin_person`: single hit → hits list; failure/empty → `[]` |
+| `TestResolveAsinBook` | 8 | `resolve_asin_book`: single hit → book + release + `LOOKUP_OK`; 404 → `LOOKUP_MISSING` with one request; 401 terminal; 500/malformed → `LOOKUP_UNAVAILABLE`; null/numeric/missing ID on a hit → `LOOKUP_UNAVAILABLE` |
+| `TestResolveAsinPerson` | 7 | `resolve_asin_person`: single hit → hits + `LOOKUP_OK`; 200 empty/404 → `LOOKUP_MISSING`; 500 → `LOOKUP_UNAVAILABLE`; hit with missing/null ID → `LOOKUP_UNAVAILABLE`; non-list JSON on 200 → `LOOKUP_UNAVAILABLE` |
 | `TestDetailAndGetters` | 7 | `get_book` (+ `include=chapters`), `get_release`, `get_person`, `get_ratings`, `search` (book/people fixtures, short-q with no filters → `[]` with no request) |
 | `TestRetryAfter` | 7 | 429 + `Retry-After` retry then success; exhausted → `None`; oversized value clamped to `MAX_RETRY_AFTER`; negative value falls back to default; future HTTP-date waits until the requested time; past HTTP-date falls back to default |
 | `TestSearchHandshake` | 14 | anonymous CSRF handshake: same-origin prime GET, double-submit token in header + Cookie, keyed bypass skips the prime, token cached per process, stale token → cache-busted re-prime (jar-held cookie) + one bounded retry, 403 twice → `None` without looping, prime without cookie / prime transport failure → `None`, `includeFields` list and comma-string forms, lazy-transport handshake and non-2xx surfacing |
@@ -51,6 +52,8 @@ contract is what gets exercised.
 | `TestLazyNon2xxHeaders` | 3 | a lazy non-2xx (429/3xx) loads the body before any headers read: the coded `HTTPError` drives the retry/`IOError` contract, no `RuntimeError` escape; an uncoded body failure retries to `None` |
 | `TestJarCsrfToken` | 3 | `jar_csrf_token`: attribute-only CookieObject (the framework shape), dict-cookie value reads, comma-joined `Set-Cookie` header value |
 | `TestAnonymousCoded403` | 1 | a coded 403 `HTTPError` raised in flight by an eager transport reaches `search()`'s re-prime branch (prime, rejected POST, re-prime, accepted POST) instead of being swallowed by the blanket except |
+| `TestEagerCodedError` | 3 | coded `HTTPError` from an eager transport through `make_request_status`: 404 terminal (one request), 500 reports the code after full retry; 404 in `resolve_asin_book` → `LOOKUP_MISSING` |
+| `TestDecodeBadUtf8` | 3 | `decode`: invalid UTF-8 → `None`, valid bytes decode; 200 with undecodable body in `resolve_asin_book` → `LOOKUP_UNAVAILABLE` |
 
 ## `test_logging.py` (16 tests)
 
@@ -71,13 +74,15 @@ contract is what gets exercised.
 | `TestParseInvalid` | 6 | `parse_metadata_id`: empty, `None`, too short/long, garbage, bad suffix |
 | `TestSerialize` | 5 | `serialize_book_id` / `serialize_person_id`: work-only, +release, person, empty → `None`, round trip |
 
-## `test_search_tools.py` (180 tests)
+## `test_search_tools.py` (203 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
 | `TestCheckForAsinBooks` | 11 | album ASIN check: filename, album, and native `book.` ID sources (incl. release pair with the complete narrator list), release/ASIN/ID 404s, release without a book, and non-ID input → `False` |
-| `TestFileAsinHints` | 8 | filename ASIN hints: detection, suffixes, non-ASIN ignored |
-| `TestCheckForAsinPeople` | 9 | artist ASIN check: sources, non-ASIN ignored, disambiguation in native-ID quick match |
+| `TestFileAsinHints` | 10 | filename ASIN hints: detection from all name parts (tree absent still uses filename), case-insensitive dedupe, conflicting parts skip the lookup and fall through, manual typed query ignores file ASINs, bounded match, non-Audible token ignored, legacy grammar kept, unavailable lookup stops without fallback |
+| `TestStoredPlexGuid` | 11 | stored Audnexus GUID extraction (region/query), scheme rejection including local/none/foreign payloads that would pass the raw parser, missing tree/guid, hit, same-ASIN dedupe (a miss does not retry the same file ASIN), conflict stop, unavailable/401 stop, manual override, native skip |
+| `TestStoredPlexGuidPeople` | 5 | stored artist GUID: single hit, ambiguous fallthrough, unconfirmed detail fallthrough, unavailable stop, detail-fetch failure stop |
+| `TestCheckForAsinPeople` | 11 | artist ASIN check: sources, non-ASIN ignored, disambiguation in native-ID quick match; unavailable people lookup stops without search; detail 404 is a catalog miss, search continues |
 | `TestSearchToolHelpers` | 5 | `validate_author_name`: clears bad, keeps good, sets primary author |
 | `TestAlbumSearchToolBody` | 6 | `build_search_body`: with/without artist filters, too-short → `None`, nothing → `None`, filters-only (short title + artist) |
 | `TestAlbumParentAuthor` | 6 | parent author ID wiring: matched native person ID as evidence, mismatch/absence tolerated |
@@ -89,7 +94,7 @@ contract is what gets exercised.
 | `TestAlbumReleasesForBook` | 5 | `releases_for_book`: original dicts returned, duplicate IDs deduped, merged-book 301 to winner resolved, release for another book filtered, failure/empty → `[]` |
 | `TestRecordingHints` | 11 | `recording_hints`: track duration and language signals, partial/absent → `None`, unmapped stream code without a usable label → no hint, display label in the code field is a hint |
 | `TestFoldAccentsSandbox` | 1 | `fold_accents`/`phrase_key` index text instead of iterating it, so the Plex sandbox's `x.__iter__()` iteration cannot raise on Python 2 `unicode` |
-| `TestImageAndDateHelpers` | 15 | `image_thumb`, `release_year` (non-text date → missing), `release_publisher` (credited name, name fallback, singular `publisher` payload, malformed), `edition_tags` (plain distinct tags, publisher/year disambiguation for shared tags, bounded publisher text, numbered fallback when nothing separates rows, rendered-text comparison, positional fallback for malformed data), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
+| `TestImageAndDateHelpers` | 18 | `image_thumb` (small derivative, untrusted URL rejected), `release_year` (non-text date → missing), `release_publisher` (credited name, name fallback, singular `publisher` payload, malformed), `edition_tags` (plain distinct tags, publisher/year disambiguation for shared tags, release-year fallback, bounded publisher text, bounded unique long tag, numbered fallback when nothing separates rows, numbered text within limit, failed group leaves no stale reservation, rendered-text comparison, positional fallback for malformed data), `release_narrators`, `first_image_thumb` (first usable image, not just the first) |
 | `TestArtistSearchToolBody` | 2 | `build_search_body` (artist): body, too-short → `None` |
 | `TestCleanupAuthorName` | 4 | `cleanup_author_name`: role removals, diacritics |
 | `TestArtistMultiArtist` | 5 | `find_non_contributor`, `handle_multi_artist`, `get_primary_author` |
@@ -98,15 +103,22 @@ contract is what gets exercised.
 | `TestScoreAlbumGuard` | 3 | `score_album`: a numeric catalog title with a subtitle does not raise (text-only concatenation), a non-text subtitle is skipped, the subtitle path still lowers the distance for text titles |
 | `TestSeriesHint` | 18 | Fix Match series-name hint: whole-token phrase matching (accents, case, punctuation/underscores as separators, token boundaries, min length, non-Latin), position support/contradiction/unknown, a trailing bracketed or bare volume number as the requested number, all matching memberships checked, malformed memberships and non-list containers degrade, direct tie-break gate |
 
-## `test_update_tools.py` (86 tests)
+## `test_asin_tools.py` (11 tests)
 
 | Class | Count | Production path covered |
 |---|---|---|
-| `TestAlbumResolveLegacyAsin` | 3 | album `resolve_item`: legacy migration (populates, stashes native IDs), 404 untouched |
+| `TestTypedAsinMatch` | 5 | broad typed grammar: B-prefixed, numeric, legacy window inside a longer run, no match, empty/None |
+| `TestFileAsinHints` | 6 | scanner grammar: uppercase/dedupe, bounded match, non-Audible token rejected, first-seen order, URL encoding left to the caller, empty/None |
+
+## `test_update_tools.py` (88 tests)
+
+| Class | Count | Production path covered |
+|---|---|---|
+| `TestAlbumResolveLegacyAsin` | 4 | album `resolve_item`: legacy migration (populates, stashes native IDs), 404 untouched, unavailable lookup untouched |
 | `TestAlbumResolveNative` | 12 | album `resolve_item`: book+release pinned, book-only multi-edition stays work-only, single-release 404 → work-only, mismatched pinned release rejected, pinned release 404 preserves title/styles/moods, pinned release narrators isolated from alternate editions, merged-book canonical detail ID replaces the stored loser ID (work-only and pinned), pinned release with `book: null` fails closed, unpinned release with `book: null` falls back to work-only, book 404 preserved, wrong-type invalid |
 | `TestAlbumParseApiResponse` | 9 | album `parse_api_response`: series, no-releases work-only, audible chip rating (absent/non-first), missing cover → empty thumb, null/absent person names filtered, ID-backed credits deduped by scope/person/role, dual-role person kept in both sets, non-mapping `chapterDetail` / non-list `chapters` → no chapter data |
 | `TestReleaseSelection` | 3 | `select_release`: only release selected, multi-edition → work-only, no releases → `None` |
-| `TestArtistResolve` | 5 | artist `resolve_item`: legacy migration, native person, 404 untouched, ambiguous ASIN untouched, wrong-type invalid |
+| `TestArtistResolve` | 6 | artist `resolve_item`: legacy migration, native person, 404 untouched, unavailable lookup untouched, ambiguous ASIN untouched, wrong-type invalid |
 | `TestUpdateToolHelpers` | 8 | `cleanup_html` (books/authors), `replace_html_special`, `collect_metadata_to_log` (books + authors), `collect_metadata_arrs_to_log` (legacy typo), `getDateFromString`, `volume_prefix` |
 | `TestAlbumSetters` | 23 | `set_metadata_title` (+subtitle), `set_metadata_rating` (x2, none no-op), `set_metadata_date` guard, `set_metadata_studio`, `set_metadata_summary` (+ empty/whitespace/markup-only description preserves an existing summary and is logged; forced and non-forced assignment unchanged), `set_metadata_sort_title` (+series), `set_metadata_tags` (+keep existing genres), `set_metadata_series_collections` (no container → warning, not silent), `set_metadata_chapters` (overlapping — out-of-order and identical — and one-based-ordinal sequences rejected before any title write; in-order sequence rewrites generic titles) |
 | `TestArtistSetters` | 15 | `set_metadata_title`, `set_metadata_description` (+ same keep-existing-on-empty policy as the album setter), `set_metadata_sort_title` (last name/JR/single word), `set_metadata_tags`, `set_empty_variables` |
@@ -125,7 +137,7 @@ contract is what gets exercised.
 | `clear_styles` on forced album update | narrators re-added from release `people` (role `Narrator`); styles never cleared on work-only updates |
 | `set_empty_variables` on empty `narrator` | no-op on empty `narrator` |
 | `response['rating']` from the detail body | `get_ratings` (`audible` chip, order-independent) |
-| `search_asin`/`override_with_asin` (ASIN anywhere in title/album) | `check_for_asin` is the sole ASIN appender (album/filename/metadata_id) |
+| `search_asin`/`override_with_asin` (ASIN anywhere in title/album) | `check_for_asin` is the sole ASIN appender (stored Plex GUID, album/filename/manual input, metadata_id) |
 | `matchedReleaseId` select | `select_release` (only release selected; multiple editions stay work-level) |
 | `store_author_as_mood` pref | kept |
 | `clear_moods` on force | kept |

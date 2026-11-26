@@ -176,12 +176,25 @@ class TestAlbumResolveLegacyAsin(unittest.TestCase):
         self.assertEqual(tool.native_book_id, None)
         # A valid ten-character ASIN: the resolve endpoint was actually
         # hit (an 11-char value would be rejected before any request).
-        # The 404 is retried within the attempt budget.
+        # A confirmed 404 is terminal, not a retryable failure.
         self.assertEqual(
             [req[0] for req in HTTP.requests],
-            [BASE + '/audiobooks/external/audible/B0AAAAAAAA'] *
-            api_client.MAX_ATTEMPTS)
+            [BASE + '/audiobooks/external/audible/B0AAAAAAAA'])
         self.assertEqual(tool.native_release_id, None)
+
+    def test_unavailable_leaves_untouched(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/B0AAAAAAAA':
+                (500, ''),
+        })
+        meta = FakeMetadata('B0AAAAAAAA_us')
+        before = (meta.title, meta.summary, meta.studio, meta.id)
+        tool = make_album('B0AAAAAAAA_us', metadata=meta)
+        self.assertFalse(tool.resolve_item())
+        self.assertEqual((meta.title, meta.summary, meta.studio, meta.id),
+                         before)
+        self.assertIsNone(tool.native_book_id)
+        self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
 
     def test_selected_release_404_work_only(self):
         # The resolve's matched release detail 404s: fall back to the
@@ -582,6 +595,18 @@ class TestArtistResolve(unittest.TestCase):
         self.assertFalse(tool.resolve_item())
         self.assertEqual(meta.title, None)
         self.assertEqual(meta.summary, None)
+
+    def test_unavailable_leaves_untouched(self):
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (500, ''),
+        })
+        meta = FakeMetadata('B00G0WYW92')
+        tool = make_artist('B00G0WYW92', metadata=meta)
+        self.assertFalse(tool.resolve_item())
+        self.assertEqual(meta.id, 'B00G0WYW92')
+        self.assertIsNone(meta.title)
+        self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
 
     def test_ambiguous_asin_leaves_untouched(self):
         hits = load_fixture('person_external_resolve_B00G0WYW92.json')

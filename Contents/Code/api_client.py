@@ -19,11 +19,16 @@ from logging import Logging
 from _version import version
 
 # The Plex sandbox does not expose the ``bytes`` name and on Python 2
-# ``str`` is bytes; resolve the type at import time.
+# ``str`` is bytes; resolve the types at import time.
 try:
     BYTES_TYPE = bytes
 except NameError:  # pragma: no cover - python 2 sandbox
     BYTES_TYPE = str
+
+try:
+    TEXT_TYPE = unicode
+except NameError:  # pragma: no cover - python 3
+    TEXT_TYPE = str
 
 log = Logging()
 
@@ -41,6 +46,19 @@ MAX_RETRY_AFTER = 60
 # Shortest free-text query the API accepts; the search builders and
 # search() share this threshold so they cannot drift.
 MIN_QUERY_LENGTH = 3
+
+# ASIN lookup result categories. A confirmed catalog miss (404) is
+# different from a lookup that could not be completed (transport, auth,
+# throttling, server, or an unusable response).
+LOOKUP_OK = 'ok'
+LOOKUP_MISSING = 'missing'
+LOOKUP_UNAVAILABLE = 'unavailable'
+LOOKUP_AMBIGUOUS = 'ambiguous'
+LOOKUP_REJECTED = 'rejected'
+
+# A lookup that gets one of these statuses is definitive for that ID and
+# must not consume the remaining retry budget.
+ASIN_TERMINAL_STATUSES = (400, 401, 403, 404)
 
 # Image fetches (fetch_bytes) are restricted to HTTPS on these hosts — the
 # catalog's image CDN. URLs from the API are data, not instructions: anything
@@ -70,7 +88,13 @@ def decode(body):
     if body is None:
         return None
     if isinstance(body, BYTES_TYPE):
-        body = body.decode('utf-8')
+        # Undecodable bytes are an unusable response, not a crash: a bad
+        # UTF-8 body raises UnicodeDecodeError that would otherwise
+        # escape make_request_status and abort the search/update.
+        try:
+            body = body.decode('utf-8')
+        except ValueError:
+            return None
     if not body:
         return None
     try:
@@ -127,18 +151,23 @@ def retry_after_seconds(response):
     return delay
 
 
-def request_with_retries(url, method=None, headers=None, data=None):
+def request_with_retries(url, method=None, headers=None, data=None,
+                         stop_on_status=()):
     """
         Makes an HTTP call, retrying on failure.
 
         A 429 sleeps Retry-After (default 1) seconds before the next attempt;
-        any other non-2xx status or transport error also retries. Successful
+        any other non-2xx status or transport error also retries, except a
+        status listed in stop_on_status, which returns immediately. Successful
         responses carry no added delay, and no sleep is performed after the
-        final attempt. Returns the response (str()-able body plus
-        .status/.headers) on the first 2xx, or None once MAX_ATTEMPTS is
-        exhausted.
+        final attempt.
+
+        Returns (response, status) on the first 2xx. On failure returns
+        (None, status), where status is the last HTTP status, 599 when the
+        transport state is unknown, or None when no response was produced.
     """
     response = None
+    last_status = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         response = None
         try:
@@ -146,9 +175,21 @@ def request_with_retries(url, method=None, headers=None, data=None):
                 url, method=method, headers=headers or {}, data=data,
                 timeout=90
             )
-        except Exception:
+        except Exception as error:
             log.error('API request failed (attempt %d): %s' % (attempt, url))
-            response = None
+            # An eager transport raises its coded HTTPError in flight, so
+            # there is no response object to read. Recover the status from
+            # the exception so a definitive code (e.g. a confirmed 404)
+            # is classified by stop_on_status instead of being retried and
+            # reported as an unknown transport failure.
+            status = http_error_code(error)
+            if status is not None:
+                last_status = status
+                if status in stop_on_status:
+                    return (None, status)
+                if attempt < MAX_ATTEMPTS:
+                    sleep(DEFAULT_RETRY_AFTER)
+                continue
 
         if response is None:
             if attempt < MAX_ATTEMPTS:
@@ -161,15 +202,18 @@ def request_with_retries(url, method=None, headers=None, data=None):
         status, body = resolve_response_status(response)
         if status is None and body is not None:
             # Lazy transport 2xx: no .status attribute, body loaded.
-            return response
+            return (response, 200)
         if status is None:
             # Lazy transport body load that raised no coded HTTPError:
             # treat as a transport failure.
             log.error('API status unknown (attempt %d): %s' % (
                 attempt, url))
             status = 599
+        last_status = status
         if 200 <= status < 300:
-            return response
+            return (response, status)
+        if status in stop_on_status:
+            return (None, status)
 
         if status == 429:
             # The lazy transport answers a headers-only read with a HEAD
@@ -190,7 +234,7 @@ def request_with_retries(url, method=None, headers=None, data=None):
         if attempt < MAX_ATTEMPTS:
             sleep(retry_after)
 
-    return None
+    return (None, last_status)
 
 
 def make_request(url):
@@ -198,15 +242,29 @@ def make_request(url):
         GETs a URL and returns the decoded JSON object, or None on any
         failure (non-2xx, malformed JSON, JSON:API error envelope).
 
-        The API key is attached per-request — only this and post_json()
-        ever send it, and only to the trusted API origin.
+        The API key is attached per-request — only this,
+        make_request_status(), and post_json() ever send it, and only to
+        the trusted API origin.
+    """
+    data, status = make_request_status(url)
+    return data
+
+
+def make_request_status(url, stop_on_status=()):
+    """
+        GETs a URL and returns (decoded JSON or None, final status).
+
+        stop_on_status ends the retry loop for a definitive status such as
+        a confirmed 404. A 2xx whose body is malformed or an error envelope
+        returns (None, 200); callers treat that as an unusable response.
     """
     key = api_key()
     headers = {'X-API-Key': key} if key != 'anonymous' else {}
-    response = request_with_retries(url, headers=headers)
+    response, status = request_with_retries(
+        url, headers=headers, stop_on_status=stop_on_status)
     if response is None:
-        return None
-    return decode(str(response))
+        return (None, status)
+    return (decode(str(response)), status)
 
 
 # Image redirects are followed by fetch_bytes() hop by hop, with the
@@ -334,7 +392,7 @@ def post_json(path, body):
         'User-Agent': USER_AGENT,
         'X-API-Key': api_key(),
     }
-    response = request_with_retries(
+    response, status = request_with_retries(
         url, method='POST', headers=headers,
         data=json.dumps(body, ensure_ascii=True)
     )
@@ -363,16 +421,26 @@ def resolve_asin_book(asin):
         Resolves an Audible ASIN to a Book via
         /audiobooks/external/audible/{asin}.
 
-        Returns (book, matchedReleaseId-or-None); (None, None) on 404 and on
-        any other failure (the log distinguishes them).
+        Returns (book, matchedReleaseId-or-None, status). status is
+        LOOKUP_OK, LOOKUP_MISSING for a confirmed 404, or
+        LOOKUP_UNAVAILABLE for transport, auth, throttling, server, or an
+        unusable response.
     """
-    data = make_request(
-        '%s/audiobooks/external/audible/%s' % (BASE_URL, asin))
-    if not isinstance(data, dict) or 'id' not in data:
-        if data is None:
-            log.warn('ASIN %s not resolved (404 or transport failure)' % asin)
-        return (None, None)
-    return (data, data.get('matchedReleaseId'))
+    data, status = make_request_status(
+        '%s/audiobooks/external/audible/%s' % (BASE_URL, asin),
+        ASIN_TERMINAL_STATUSES)
+    if status == 404:
+        log.info('ASIN %s not in AudiobookDB catalog' % asin)
+        return (None, None, LOOKUP_MISSING)
+    if status != 200:
+        log.warn('ASIN %s lookup unavailable (status %s)' % (
+            asin, status))
+        return (None, None, LOOKUP_UNAVAILABLE)
+    book_id = data.get('id') if isinstance(data, dict) else None
+    if not isinstance(book_id, TEXT_TYPE) or not book_id:
+        log.warn('ASIN %s lookup returned an unusable response' % asin)
+        return (None, None, LOOKUP_UNAVAILABLE)
+    return (data, data.get('matchedReleaseId'), LOOKUP_OK)
 
 
 def resolve_asin_person(asin):
@@ -380,13 +448,38 @@ def resolve_asin_person(asin):
         Resolves an Audible author ASIN to Person hits via
         /people?external=Audible:{asin}&take=2.
 
-        Returns the hits list (0, 1, or 2+); [] on any failure.
+        Returns (hits, status). status is LOOKUP_OK when hits is non-empty,
+        LOOKUP_MISSING for a confirmed 404 or empty list, and
+        LOOKUP_UNAVAILABLE for transport, auth, throttling, server, or an
+        unusable response.
     """
-    data = make_request(
-        '%s/people?external=Audible%%3A%s&take=2' % (BASE_URL, asin))
+    data, status = make_request_status(
+        '%s/people?external=Audible%%3A%s&take=2' % (BASE_URL, asin),
+        ASIN_TERMINAL_STATUSES)
+    if status == 404:
+        return ([], LOOKUP_MISSING)
+    if status != 200:
+        log.warn('ASIN %s people lookup unavailable (status %s)' % (
+            asin, status))
+        return ([], LOOKUP_UNAVAILABLE)
     if not isinstance(data, list):
-        return []
-    return data
+        log.warn('ASIN %s people lookup returned an unusable response'
+                 % asin)
+        return ([], LOOKUP_UNAVAILABLE)
+    if not data:
+        return ([], LOOKUP_MISSING)
+    for hit in data:
+        if not isinstance(hit, dict) \
+                or not isinstance(hit.get('id'), TEXT_TYPE) \
+                or not hit.get('id'):
+            # A hit without a usable id cannot be detail-fetched. Reject
+            # the whole response rather than drop the entry: silently
+            # dropping it could turn an ambiguous response into a
+            # singleton that auto-matches.
+            log.warn('ASIN %s people lookup returned an unusable response'
+                     % asin)
+            return ([], LOOKUP_UNAVAILABLE)
+    return (data, LOOKUP_OK)
 
 
 def get_book(book_id, include=None):
@@ -412,6 +505,15 @@ def get_person(person_id):
         GETs /people/{id}. Returns the decoded object or None on failure.
     """
     return make_request('%s/people/%s' % (BASE_URL, person_id))
+
+
+def get_person_status(person_id):
+    """
+        GETs /people/{id} and returns (decoded object or None, final
+        status), so a caller can tell a confirmed 404 from an unavailable
+        lookup (transport, server, or an unusable response).
+    """
+    return make_request_status('%s/people/%s' % (BASE_URL, person_id))
 
 
 def http_error_code(error):

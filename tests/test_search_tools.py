@@ -95,12 +95,14 @@ class FakeTrack(object):
 
 
 class FakeTree(object):
-    def __init__(self, files=None, tracks=None, parts=None):
+    def __init__(self, files=None, tracks=None, parts=None, guid=None):
         if parts is None:
             parts = [FakePart(name) for name in files or []]
         self.items = [FakeItem(parts)]
         self.tracks = tracks or {}
         self.children = list(self.tracks.values())
+        if guid is not None:
+            self.guid = guid
 
 
 def make(content_type, media=None, manual=False):
@@ -358,6 +360,247 @@ class TestFileAsinHints(unittest.TestCase):
         self.assertEqual(tool.results.appended[0].id,
                          'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
 
+    def test_file_asin_unavailable_stops_without_fallback(self):
+        # A 500 from the file-ASIN lookup is an outage, not a catalog
+        # miss: the automatic path stops for the item, no title search.
+        install_transport({
+            BASE + '/audiobooks/external/audible/B00B5HZGUG': (500, ''),
+        })
+        tool = make('books', FakeMedia(filename='B00B5HZGUG'))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+        self.assertEqual(
+            len(self._asin_requests()), api_client.MAX_ATTEMPTS)
+
+    def test_typed_asin_unavailable_stops(self):
+        # A 500 from a typed-ASIN lookup stops the automatic path the
+        # same way a stored-ASIN outage does.
+        install_transport({
+            BASE + '/audiobooks/external/audible/A000000001': (500, ''),
+        })
+        tool = make('books', FakeMedia(album='Title A000000001'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+        self.assertEqual(
+            len(self._asin_requests()), api_client.MAX_ATTEMPTS)
+
+
+class TestStoredPlexGuid(unittest.TestCase):
+    """The previous Audnexus match is the first automatic ID source."""
+
+    BOOK_FIXTURE = 'book_external_resolve_B00B5HZGUG.json'
+
+    def _book_mapping(self):
+        return {
+            BASE + '/audiobooks/external/audible/B00B5HZGUG':
+                (200, api_body(load_fixture(self.BOOK_FIXTURE))),
+        }
+
+    @staticmethod
+    def _asin_requests():
+        return [req for req in HTTP.requests
+                if '/audiobooks/external/audible/' in req[0]]
+
+    def test_stored_guid_extracts_region_and_query(self):
+        tool = make('books', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00B5HZGUG_us?lang=en')))
+        self.assertEqual(tool.stored_plex_asin(), 'B00B5HZGUG')
+
+    def test_stored_guid_rejects_non_audnexus_schemes(self):
+        cases = [
+            'local://1541439449',
+            'com.plexapp.agents.none://356154?lang=xn',
+            'com.plexapp.agents.other://B00B5HZGUG?lang=en',
+            'com.plexapp.agents.audiobookdb://book.WQQDcMBQ3qUT',
+            'not a guid',
+        ]
+        for guid in cases:
+            tool = make('books', FakeMedia(tree=FakeTree(guid=guid)))
+            self.assertIsNone(tool.stored_plex_asin(), guid)
+
+    def test_missing_tree_and_guid_return_none(self):
+        self.assertIsNone(make('books', FakeMedia()).stored_plex_asin())
+        self.assertIsNone(
+            make('books', FakeMedia(tree=FakeTree())).stored_plex_asin())
+        self.assertIsNone(
+            make('books',
+                 FakeMedia(tree=FakeTree(guid=''))).stored_plex_asin())
+
+    def test_stored_guid_appends_and_skips_search(self):
+        install_transport(self._book_mapping())
+        tool = make('books', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00B5HZGUG?lang=en')))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(len(tool.results.appended), 1)
+        self.assertEqual(tool.results.appended[0].id,
+                         'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        self.assertEqual(len(self._asin_requests()), 1)
+        self.assertTrue(
+            self._asin_requests()[0][0].endswith('/B00B5HZGUG'))
+
+    def test_stored_guid_miss_does_not_retry_same_file_asin(self):
+        install_transport({})
+        tool = make('books', FakeMedia(
+            filename='B00B5HZGUG',
+            tree=FakeTree(guid=(
+                'com.plexapp.agents.audnexus://B00B5HZGUG?lang=en'))))
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        self.assertEqual(len(self._asin_requests()), 1)
+
+    def test_stored_guid_conflict_with_file_asin_stops(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/B00G0WYW92':
+                (200, api_body(load_fixture(self.BOOK_FIXTURE))),
+        })
+        tool = make('books', FakeMedia(
+            filename='B00G0WYW92',
+            tree=FakeTree(guid=(
+                'com.plexapp.agents.audnexus://B00B5HZGUG?lang=en'))))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        # The conflict is detected before any lookup: neither the stored
+        # ASIN nor the distinct file ASIN is resolved; the item is left
+        # for Fix Match.
+        self.assertEqual(self._asin_requests(), [])
+
+    def test_stored_guid_hit_with_matching_file_asin_emitted(self):
+        # The file carries the same ASIN as the stored GUID: no conflict,
+        # so the stored match is emitted and no second lookup is made.
+        install_transport(self._book_mapping())
+        tool = make('books', FakeMedia(
+            filename='B00B5HZGUG',
+            tree=FakeTree(guid=(
+                'com.plexapp.agents.audnexus://B00B5HZGUG?lang=en'))))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(len(tool.results.appended), 1)
+        self.assertEqual(tool.results.appended[0].id,
+                         'book.WQQDcMBQ3qUT.release.dPL9fC7YnK8X')
+        self.assertEqual(len(self._asin_requests()), 1)
+        self.assertTrue(
+            self._asin_requests()[0][0].endswith('/B00B5HZGUG'))
+
+    def test_stored_guid_unavailable_stops_without_fallback(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/B00B5HZGUG':
+                (500, ''),
+        })
+        tool = make('books', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00B5HZGUG?lang=en')))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        self.assertEqual(
+            len(self._asin_requests()), api_client.MAX_ATTEMPTS)
+
+    def test_stored_guid_401_terminal_and_stops(self):
+        install_transport({
+            BASE + '/audiobooks/external/audible/B00B5HZGUG':
+                (401, ''),
+        })
+        tool = make('books', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00B5HZGUG?lang=en')))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        self.assertEqual(len(self._asin_requests()), 1)
+
+    def test_manual_query_ignores_stored_guid(self):
+        install_transport(self._book_mapping())
+        tool = make('books', FakeMedia(
+            album='The Martian',
+            tree=FakeTree(
+                guid='com.plexapp.agents.audnexus://B00B5HZGUG?lang=en')),
+            manual=True)
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(HTTP.requests, [])
+
+    def test_native_guid_is_not_looked_up(self):
+        install_transport(self._book_mapping())
+        tool = make('books', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audiobookdb://book.WQQDcMBQ3qUT')))
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(HTTP.requests, [])
+
+
+class TestStoredPlexGuidPeople(unittest.TestCase):
+    def test_stored_guid_single_hit_appends(self):
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (200, api_body(load_fixture(
+                    'person_external_resolve_B00G0WYW92.json'))),
+            BASE + '/people/ypMPwXzWXaiX':
+                (200, api_body(load_fixture(
+                    'person_detail_ypMPwXzWXaiX.json'))),
+        })
+        tool = make('authors', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00G0WYW92?lang=en')))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended[0].id,
+                         'person.ypMPwXzWXaiX')
+
+    def test_stored_guid_ambiguous_falls_through(self):
+        hits = load_fixture('person_external_resolve_B00G0WYW92.json')
+        hit2 = dict(hits[0])
+        hit2['id'] = 'otherPerson123'
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (200, api_body(hits + [hit2])),
+        })
+        tool = make('authors', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00G0WYW92?lang=en')))
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+
+    def test_stored_guid_unconfirmed_detail_falls_through(self):
+        person = load_fixture('person_detail_ypMPwXzWXaiX.json')
+        del person['external']
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (200, api_body(load_fixture(
+                    'person_external_resolve_B00G0WYW92.json'))),
+            BASE + '/people/ypMPwXzWXaiX': (200, api_body(person)),
+        })
+        tool = make('authors', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00G0WYW92?lang=en')))
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+
+    def test_stored_guid_unavailable_stops(self):
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (500, ''),
+        })
+        tool = make('authors', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00G0WYW92?lang=en')))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        self.assertEqual(len(HTTP.requests), api_client.MAX_ATTEMPTS)
+
+    def test_stored_guid_detail_fetch_failure_stops(self):
+        # The ASIN resolves to one person, but the person-detail GET
+        # fails (500). A failed detail fetch is an outage, not a
+        # rejection: the automatic path stops instead of falling through
+        # to a name search.
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2':
+                (200, api_body(load_fixture(
+                    'person_external_resolve_B00G0WYW92.json'))),
+            BASE + '/people/ypMPwXzWXaiX': (500, ''),
+        })
+        tool = make('authors', FakeMedia(tree=FakeTree(
+            guid='com.plexapp.agents.audnexus://B00G0WYW92?lang=en')))
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        # Resolve (1) + detail fetches (MAX_ATTEMPTS each, one person).
+        self.assertEqual(
+            len(HTTP.requests), 1 + api_client.MAX_ATTEMPTS)
+
 
 class TestCheckForAsinPeople(unittest.TestCase):
     """Quick-match person appends (legacy ASIN and native IDs)."""
@@ -390,6 +633,42 @@ class TestCheckForAsinPeople(unittest.TestCase):
         tool = make('authors', FakeMedia(artist='Andy Weir B00G0WYW92'))
         self.assertFalse(tool.check_for_asin())
         self.assertEqual(tool.results.appended, [])
+
+    def test_manual_typed_person_asin_unavailable_stops(self):
+        # A 500 from the people lookup for a typed author ASIN stops the
+        # search: no result is appended and no /search request is made.
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2': (500, ''),
+        })
+        tool = make('authors', FakeMedia(artist='Andy Weir B00G0WYW92'),
+                    manual=True)
+        self.assertTrue(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        search_reqs = [req for req in HTTP.requests
+                       if req[0] == BASE + '/search']
+        self.assertEqual(search_reqs, [])
+        people_reqs = [req for req in HTTP.requests
+                       if req[0] ==
+                       BASE + '/people?external=Audible%3AB00G0WYW92&take=2']
+        self.assertEqual(len(people_reqs), api_client.MAX_ATTEMPTS)
+
+    def test_manual_typed_person_asin_detail_404_falls_through(self):
+        # The ASIN resolves to one person, but the person-detail GET is a
+        # confirmed 404: the lookup is a catalog miss, not an outage, so
+        # the search continues (returns False) with no quick match.
+        install_transport({
+            BASE + '/people?external=Audible%3AB00G0WYW92&take=2': (
+                200, api_body(
+                    load_fixture('person_external_resolve_B00G0WYW92.json'))),
+            BASE + '/people/ypMPwXzWXaiX': (404, ''),
+        })
+        tool = make('authors', FakeMedia(artist='Andy Weir B00G0WYW92'),
+                    manual=True)
+        self.assertFalse(tool.check_for_asin())
+        self.assertEqual(tool.results.appended, [])
+        # Resolve (1) + detail fetches (MAX_ATTEMPTS each, one person).
+        self.assertEqual(
+            len(HTTP.requests), 1 + api_client.MAX_ATTEMPTS)
 
     def test_artist_404_returns_false(self):
         install_transport({})

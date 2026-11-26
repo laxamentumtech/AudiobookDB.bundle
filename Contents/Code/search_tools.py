@@ -5,6 +5,7 @@ import unicodedata
 # Import internal tools
 from logging import Logging
 import api_client
+import asin_tools
 import metadata_ids
 from credits import collect_role_credits
 
@@ -17,15 +18,9 @@ try:
 except ImportError:  # pragma: no cover - python 2
     import urllib as url_parse
 
-# Typed lookups keep the legacy broad grammar: users may paste any
-# ten-character ID-shaped token.
-asin_regex = re.compile(r'(?=.\d)[A-Z\d]{10}')
-
-# Scanner filenames are untrusted bulk input: only the conventional
-# Audible ASIN (B + 9 alphanumerics) counts as an edition hint, bounded so
-# a hash or hex run is never read as one.
-file_asin_regex = re.compile(
-    r'(?<![A-Za-z0-9])B[A-Za-z0-9]{9}(?![A-Za-z0-9])', re.IGNORECASE)
+# The legacy agent's bundle identifier. A stored GUID only qualifies as
+# migration evidence when it belongs to this agent.
+AUDNEXUS_AGENT = 'com.plexapp.agents.audnexus'
 
 YEAR_PREFIX = re.compile(r'\A\s*(\d{4})')
 
@@ -340,7 +335,7 @@ class SearchTool:
             value = url_parse.unquote(value)
         except Exception as e:
             log.error('Error unquoting filename for ASIN: %s', e)
-        return [match.group(0) for match in file_asin_regex.finditer(value)]
+        return asin_tools.file_asin_hints(value)
 
     def file_asins(self):
         """
@@ -359,8 +354,7 @@ class SearchTool:
                 names.append(file_name)
         asins = []
         for name in names:
-            for match in self.asin_matches(name):
-                asin = match.upper()
+            for asin in self.asin_matches(name):
                 if asin not in asins:
                     asins.append(asin)
         return asins
@@ -491,30 +485,116 @@ class SearchTool:
 
         return new_name
 
+    def stored_plex_asin(self):
+        """
+            Legacy ASIN from the item's current Plex GUID when the item
+            still carries the previous Audnexus match.
+
+            The framework builds the media tree from the item's database
+            ID, so the GUID is available without a direct PMS request.
+            Only an Audnexus GUID is migration evidence: local, none, and
+            foreign agent GUIDs are ignored even when their payload would
+            pass the ASIN grammar.
+        """
+        try:
+            guid = self.media.tree.guid
+        except AttributeError:
+            return None
+        if not guid:
+            return None
+        identifier, separator, payload = guid.partition('://')
+        if not separator or identifier != AUDNEXUS_AGENT:
+            return None
+        raw = payload.split('?', 1)[0]
+        parsed = metadata_ids.parse_metadata_id(raw, self.content_type)
+        if parsed[0] != 'legacy':
+            return None
+        return parsed[1]
+
+    def stop_on_unavailable(self, asin, status):
+        """
+            True when an ASIN lookup came back LOOKUP_UNAVAILABLE and the
+            automatic path must stop for this item: an outage must not be
+            mistaken for a catalog miss, so the item is left for Fix Match
+            (or a later refresh) instead of falling back to a less precise
+            name search.
+        """
+        if status == api_client.LOOKUP_UNAVAILABLE:
+            log.warn(
+                'ASIN %s lookup unavailable; not falling back to a less '
+                'precise match.' % asin)
+            return True
+        return False
+
     def check_for_asin(self):
         """
-            Checks filename (for books) and/or search query for a
-            quick-match ID: a native book./person. ID or a legacy ASIN.
+            Checks the stored Plex GUID, scanner filename/parts, and the
+            search query for a quick-match ID: a native book./person. ID
+            or a legacy ASIN.
 
             This is the sole appender of quick-match results: it appends
-            the result(s) itself and returns True when the caller must
-            stop the normal search, False to continue.
+            the result(s) itself when one matches, and returns True when
+            the caller must stop the normal search, False to continue. A
+            stop is not always an append: the conflict and unavailable
+            stops return True without appending.
+
+            A stored Audnexus GUID is the previous agent's match. A
+            confirmed miss falls through to file hints and title search.
+            An unavailable lookup stops the automatic path so an outage
+            cannot replace the prior match with a less precise result. A
+            stored GUID that contradicts a distinct file ASIN is left for
+            Fix Match.
         """
+        stored_asin = None
+        if not self.manual:
+            stored_asin = self.stored_plex_asin()
+            if stored_asin:
+                log.info('ASIN found in stored Plex GUID')
+                if self.content_type == 'books':
+                    # A distinct file ASIN contradicts the stored match;
+                    # check before appending so the conflict is not
+                    # masked by a score-100 stored result.
+                    distinct = [a for a in self.file_asins()
+                                if a != stored_asin]
+                    if distinct:
+                        log.info(
+                            'Stored ASIN %s conflicts with file '
+                            'ASIN(s) %s; not auto-matching.' % (
+                                stored_asin, ', '.join(distinct)))
+                        return True
+                    appended, status = self.append_quick_match_book(
+                        stored_asin)
+                else:
+                    appended, status = self.append_quick_match_person(
+                        stored_asin)
+                if appended:
+                    return True
+                if self.stop_on_unavailable(stored_asin, status):
+                    return True
+
         # Check scanner file hints for an ASIN if content type is books. A
         # manual (Fix Match) query takes precedence over those hints, so
         # the user can correct a wrong filename ASIN. Conflicting file
         # ASINs are ambiguous evidence: never look one up.
         if self.content_type == 'books' and not self.manual:
             asins = self.file_asins()
+            if stored_asin:
+                # A distinct file ASIN already stopped the automatic path
+                # above, so the file carried only the ID read from the
+                # stored GUID. Do not repeat that lookup.
+                asins = []
             if len(asins) > 1:
                 log.info('Conflicting file ASINs. Not quick-matching.')
                 return False
             if asins:
                 log.info('ASIN found in file metadata')
-                return self.append_quick_match_book(asins[0])
+                appended, status = self.append_quick_match_book(asins[0])
+                if self.stop_on_unavailable(asins[0], status):
+                    return True
+                return appended
 
-        # Check search query for an ID
-        # Default to album and use artist if no album
+        # Check search query for an ID. The album fallback also runs in
+        # automatic mode when no stored or file ASIN was usable.
         manual_input = self.media.album if self.media.album \
             else self.media.artist
         if not manual_input:
@@ -533,25 +613,42 @@ class SearchTool:
         match = self.search_asin(manual_input)
         if match:
             asin = match.group(0).upper()
+            if not self.manual and stored_asin and asin == stored_asin:
+                log.info(
+                    'ASIN %s was already tried from the stored Plex GUID'
+                    % asin)
+                return False
             log.info('ASIN found in manual search')
             if self.content_type == 'books':
-                return self.append_quick_match_book(asin)
+                appended, status = self.append_quick_match_book(asin)
+                if self.stop_on_unavailable(asin, status):
+                    return True
+                return appended
             # Automatic person search must not guess.
             if not self.manual:
                 return False
-            return self.append_quick_match_person(asin)
+            appended, status = self.append_quick_match_person(asin)
+            if self.stop_on_unavailable(asin, status):
+                return True
+            return appended
 
         return False
 
-    # Quick-match appenders (score 100; return True when appended)
+    # Quick-match appenders (score 100; return (appended, lookup status))
     def append_quick_match_book(self, asin):
         """
             Resolves a legacy book ASIN and appends a score-100 result.
+            Returns (appended, lookup status) so automatic migration can
+            tell a confirmed catalog miss from an unavailable lookup.
         """
-        book, matched_release_id = api_client.resolve_asin_book(asin)
-        if book is None:
-            log.info('ASIN %s not in AudiobookDB catalog' % asin)
-            return False
+        book, matched_release_id, status = api_client.resolve_asin_book(asin)
+        if status != api_client.LOOKUP_OK or book is None:
+            if status == api_client.LOOKUP_MISSING:
+                log.info('ASIN %s not in AudiobookDB catalog' % asin)
+            else:
+                log.warn('ASIN %s lookup unavailable' % asin)
+                status = api_client.LOOKUP_UNAVAILABLE
+            return (False, status)
         title = book.get('title')
         if self.manual:
             title = self.narrator_label(
@@ -577,7 +674,7 @@ class SearchTool:
                 thumb=thumb,
             )
         )
-        return True
+        return (True, api_client.LOOKUP_OK)
 
     def append_quick_match_book_id(self, book_id, release_id):
         """
@@ -622,23 +719,44 @@ class SearchTool:
     def append_quick_match_person(self, asin):
         """
             Resolves a legacy artist ASIN and appends score-100 result(s).
-            Ambiguous matches only append in manual searches.
+            Returns (appended, lookup status). Ambiguous matches only
+            append in manual searches. A failed person-detail fetch
+            propagates LOOKUP_UNAVAILABLE so the automatic path stops
+            instead of falling through to a less precise match.
         """
-        hits = api_client.resolve_asin_person(asin)
+        hits, status = api_client.resolve_asin_person(asin)
+        if status != api_client.LOOKUP_OK:
+            if status == api_client.LOOKUP_MISSING:
+                log.info('ASIN %s not in AudiobookDB catalog' % asin)
+            else:
+                log.warn('ASIN %s lookup unavailable' % asin)
+            return (False, status)
         if len(hits) == 0:
             log.info('ASIN %s not in AudiobookDB catalog' % asin)
-            return False
+            return (False, api_client.LOOKUP_MISSING)
         if len(hits) > 1:
             if not self.manual:
                 log.info('ASIN %s is ambiguous (%d people)' % (
                     asin, len(hits)))
-                return False
+                return (False, api_client.LOOKUP_AMBIGUOUS)
             appended = False
+            unavailable = False
             for hit in hits:
-                if self.append_person_detail(hit['id'], asin):
+                ok, detail_status = self.append_person_detail(
+                    hit['id'], asin)
+                if ok:
                     appended = True
-            return appended
-        return self.append_person_detail(hits[0]['id'], asin)
+                elif detail_status == api_client.LOOKUP_UNAVAILABLE:
+                    unavailable = True
+            if appended:
+                return (True, api_client.LOOKUP_OK)
+            if unavailable:
+                return (False, api_client.LOOKUP_UNAVAILABLE)
+            return (False, api_client.LOOKUP_REJECTED)
+        ok, detail_status = self.append_person_detail(hits[0]['id'], asin)
+        if ok:
+            return (True, api_client.LOOKUP_OK)
+        return (False, detail_status)
 
     def person_display_name(self, person):
         """
@@ -654,11 +772,20 @@ class SearchTool:
         """
             Fetches a person detail, optionally confirming the Audible
             external ASIN, and appends a score-100 result.
+
+            Returns (appended, lookup status): LOOKUP_OK when a result is
+            appended, LOOKUP_REJECTED for a successful detail response
+            that does not confirm the ASIN, and LOOKUP_UNAVAILABLE when
+            the detail fetch itself failed (an outage must stop the
+            automatic path, not fall through to a less precise match).
         """
-        person = api_client.get_person(person_id)
+        person, status = api_client.get_person_status(person_id)
         if person is None:
-            log.info('Person %s not found' % person_id)
-            return False
+            if status == 404:
+                log.info('Person %s not found' % person_id)
+                return (False, api_client.LOOKUP_MISSING)
+            log.warn('Person %s detail unavailable' % person_id)
+            return (False, api_client.LOOKUP_UNAVAILABLE)
         if asin:
             confirmed = False
             for ext in person.get('external') or []:
@@ -669,7 +796,7 @@ class SearchTool:
             if not confirmed:
                 log.info('Person %s does not confirm ASIN %s' % (
                     person_id, asin))
-                return False
+                return (False, api_client.LOOKUP_REJECTED)
         self.results.Append(
             MetadataSearchResult(
                 id=metadata_ids.serialize_person_id(person['id']),
@@ -679,7 +806,7 @@ class SearchTool:
                 year=None,
             )
         )
-        return True
+        return (True, api_client.LOOKUP_OK)
 
     def append_quick_match_person_id(self, person_id):
         """
@@ -712,7 +839,7 @@ class SearchTool:
             Searches for ASIN in a string.
         """
         if input:
-            return re.search(asin_regex, input)
+            return asin_tools.typed_asin_match(input)
 
     def validate_author_name(self):
         """

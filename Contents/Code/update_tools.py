@@ -179,10 +179,16 @@ class AlbumUpdateTool(UpdateTool):
         pinned_release_id = None
         if kind == 'legacy':
             asin = self.parsed_id[1]
-            book, release_id = api_client.resolve_asin_book(asin)
+            book, release_id, status = api_client.resolve_asin_book(asin)
             if book is None:
-                log.info('Could not resolve ASIN %s; leaving metadata untouched.'
-                         % asin)
+                if status == api_client.LOOKUP_MISSING:
+                    log.info(
+                        'Could not resolve ASIN %s; leaving metadata '
+                        'untouched.' % asin)
+                else:
+                    log.warn(
+                        'ASIN %s lookup unavailable; leaving metadata '
+                        'untouched.' % asin)
                 return False
         else:
             stored_book_id, pinned_release_id = self.parsed_id[1], \
@@ -577,11 +583,16 @@ class ArtistUpdateTool(UpdateTool):
         if kind == 'legacy':
             # b. legacy ASIN
             asin = self.parsed_id[1]
-            hits = api_client.resolve_asin_person(asin)
-            if len(hits) == 0:
-                log.info(
-                    'ASIN %s not in AudiobookDB catalog; use Fix Match or '
-                    'add the external link to AudiobookDB.' % asin)
+            hits, status = api_client.resolve_asin_person(asin)
+            if status != api_client.LOOKUP_OK:
+                if status == api_client.LOOKUP_MISSING:
+                    log.info(
+                        'ASIN %s not in AudiobookDB catalog; use Fix Match '
+                        'or add the external link to AudiobookDB.' % asin)
+                else:
+                    log.warn(
+                        'ASIN %s lookup unavailable; leaving metadata '
+                        'untouched.' % asin)
                 return False
             if len(hits) > 1:
                 log.info(
